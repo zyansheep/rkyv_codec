@@ -40,7 +40,7 @@ async fn main() -> io::Result<()> {
 
 	task::spawn(async move {
 		let mut buffer = AlignedVec::new();
-		while let Ok(message) = stream::<'_, _, ChatMessage>(&mut tcp_stream, &mut buffer).await {
+		while let Ok(message) = stream::<_, ChatMessage>(&mut tcp_stream, &mut buffer).await {
 			let message: ChatMessage = message.deserialize(&mut Infallible).unwrap();
 			println!("{}", message);
 		}
