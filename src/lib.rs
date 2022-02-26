@@ -19,18 +19,18 @@
 //!     string: "hello world".to_string(),
 //!     option: Some(vec![1, 2, 3, 4]),
 //! };
-//! 
+//!
 //! // Writing
 //! let writer = Vec::new();
 //! let mut codec = RkyvWriter::new(writer);
 //! codec.send(value.clone()).await.unwrap();
-//! 
+//!
 //! // Reading
 //! let mut reader = &codec.inner()[..];
 //! let mut buffer = AlignedVec::new(); // Aligned streaming buffer for re-use
 //! let data: &Archived<Test> = stream::<_, Test>(&mut reader, &mut buffer).await.unwrap(); // This returns a reference into the passed buffer
 //! let value_received: Test = data.deserialize(&mut Infallible).unwrap();
-//! 
+//!
 //! assert_eq!(value, value_received);
 //! # })
 //! ```
@@ -62,7 +62,7 @@ use rkyv::{
 
 /// Error type for rkyv_codec
 #[derive(Debug, Error)]
-pub enum PacketCodecError {
+pub enum RkyvCodecError {
 	#[error(transparent)]
 	IoError(#[from] futures::io::Error),
 	#[error("Packet not correctly archived")]
@@ -70,9 +70,13 @@ pub enum PacketCodecError {
 	#[error("Failed to Serialize")]
 	SerializeError,
 	#[error("Failed to parse length")]
-	ReadError(#[from] unsigned_varint::io::ReadError),
+	ReadLengthError,
 	#[error("Premature End of File Error")]
 	EOFError,
+
+	#[cfg(feature = "futures_stream")]
+	#[error("Deserialize Error")]
+	DeserializeError,
 }
 
 macro_rules! ready {
@@ -85,18 +89,18 @@ macro_rules! ready {
 }
 
 /// Reads a single `&Archived<Object>` from an `AsyncRead` using the passed buffer.
-/// 
+///
 /// Until streaming iterators (and streaming futures) are implemented in rust, this currently the fastest method I could come up with that requires no recurring heap allocations.
-/// 
+///
 /// Requires rkyv validation feature & CheckBytes
 pub async fn stream<'b, Inner: AsyncRead + Unpin, Packet>(
 	mut inner: &mut Inner,
 	buffer: &'b mut AlignedVec,
-) -> Result<&'b Archived<Packet>, PacketCodecError>
+) -> Result<&'b Archived<Packet>, RkyvCodecError>
 where
 	Packet: rkyv::Archive<Archived: CheckBytes<DefaultValidator<'b>> + 'b>,
 {
-	let archive_len = unsigned_varint::aio::read_usize(&mut inner).await?;
+	let archive_len = unsigned_varint::aio::read_usize(&mut inner).await.map_err(|_|RkyvCodecError::ReadLengthError)?;
 	buffer.reserve(archive_len - buffer.len()); // Reserve at least the amount of bytes needed
 	unsafe {
 		buffer.set_len(archive_len);
@@ -104,7 +108,7 @@ where
 
 	inner.read_exact(buffer).await?;
 	let archive = rkyv::check_archived_root::<'b, Packet>(buffer)
-		.map_err(|_| PacketCodecError::CheckArchiveError)?;
+		.map_err(|_| RkyvCodecError::CheckArchiveError)?;
 	Ok(archive)
 }
 
@@ -144,13 +148,13 @@ where
 			>,
 		>,
 {
-	type Error = PacketCodecError;
+	type Error = RkyvCodecError;
 
 	fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		self.project()
 			.writer
 			.poll_flush(cx)
-			.map_err(PacketCodecError::IoError)
+			.map_err(RkyvCodecError::IoError)
 	}
 
 	fn start_send(self: Pin<&mut Self>, item: Packet) -> Result<(), Self::Error> {
@@ -164,7 +168,7 @@ where
 		);
 		let _bytes_written = serializer
 			.serialize_value(&item)
-			.map_err(|_| PacketCodecError::SerializeError)?;
+			.map_err(|_| RkyvCodecError::SerializeError)?;
 
 		let bytes_written = serializer.into_serializer().into_inner().len();
 		*this.len_state =
@@ -188,7 +192,7 @@ where
 			let buffer_left = &this.buffer[*this.buf_state..this.buffer.len()];
 			let bytes_written = ready!(Pin::new(&mut this.writer).poll_write(cx, buffer_left))?;
 			if bytes_written == 0 {
-				return Poll::Ready(Err(PacketCodecError::EOFError));
+				return Poll::Ready(Err(RkyvCodecError::EOFError));
 			}
 			*this.buf_state += bytes_written;
 		}
@@ -201,7 +205,7 @@ where
 		self.project()
 			.writer
 			.poll_close(cx)
-			.map_err(PacketCodecError::IoError)
+			.map_err(RkyvCodecError::IoError)
 	}
 }
 
@@ -247,3 +251,6 @@ mod test {
 		assert_eq!(value, value_sent);
 	}
 }
+
+#[cfg(feature = "futures_stream")]
+mod futures_stream;

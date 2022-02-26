@@ -20,7 +20,7 @@ To run:
 
 `cargo run --example chat_client`
 
-`cargo run --eaxmple chat_server`
+`cargo run --example chat_server`
 
 Simple usage example:
 ```rust

@@ -15,13 +15,15 @@ futures = "0.3.21"
 pin-project = "1.0.10"
 thiserror = "1.0.30"
 unsigned-varint = { version = "0.7.1", features = ["futures"] }
-async-std = { version = "1.10.0", features = ["attributes"] }
+futures_codec = { version = "0.4.1", optional = true }
+bytes = { version = "0.5.5", optional = true }
 
 [dev-dependencies]
-async-std = "1.10"
+async-std = { version = "1.10", features = ["attributes"] }
 
 [features]
-
+default = ["futures_stream"]
+futures_stream = ["futures_codec", "bytes"]
 
 [package.metadata.nix]
 build = true
