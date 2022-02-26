@@ -12,7 +12,7 @@ futures = "0.3.21"
 pin-project = "1.0.10"
 thiserror = "1.0.30"
 unsigned-varint = { version = "0.7.1", features = ["futures"] }
-bytes = "1.1.0"
+async-std = { version = "1.10.0", features = ["attributes"] }
 
 [dev-dependencies]
 async-std = "*"
