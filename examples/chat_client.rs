@@ -1,13 +1,13 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use async_std::io::{self, BufReader, stdin};
+use async_std::io::{self, stdin, BufReader};
 use async_std::net::TcpStream;
 use async_std::{prelude::*, task};
+use bytecheck::CheckBytes;
 use futures::SinkExt;
 use rkyv::{AlignedVec, Archive, Deserialize, Infallible, Serialize};
-use bytecheck::CheckBytes;
-use rkyv_codec::{RkyvWriter, stream};
+use rkyv_codec::{stream, RkyvWriter};
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
 // This will generate a PartialEq impl between our unarchived and archived types
@@ -20,9 +20,15 @@ struct ChatMessage {
 	index: u32,
 }
 impl fmt::Display for ChatMessage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] after {}s: {}", self.index, self.time_elapsed.as_secs(), self.message)
-    }
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(
+			f,
+			"[{}] after {}s: {}",
+			self.index,
+			self.time_elapsed.as_secs(),
+			self.message
+		)
+	}
 }
 
 #[async_std::main]
@@ -47,7 +53,7 @@ async fn main() -> io::Result<()> {
 
 	while let Some(line) = lines.next().await {
 		let now = Instant::now();
-		
+
 		let message = ChatMessage {
 			time_elapsed: now - past,
 			message: line?,
@@ -55,7 +61,7 @@ async fn main() -> io::Result<()> {
 		};
 		past = now;
 		index += 1;
-		
+
 		sender.send(message).await.unwrap();
 	}
 

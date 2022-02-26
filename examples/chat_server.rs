@@ -1,15 +1,15 @@
-use async_std::{io, task};
 use async_std::net::{TcpListener, TcpStream};
 use async_std::prelude::*;
+use async_std::{io, task};
 
 async fn process(stream: TcpStream) -> io::Result<()> {
-    println!("Accepted from: {}", stream.peer_addr()?);
+	println!("Accepted from: {}", stream.peer_addr()?);
 
-    let mut reader = stream.clone();
-    let mut writer = stream;
-    io::copy(&mut reader, &mut writer).await?;
+	let mut reader = stream.clone();
+	let mut writer = stream;
+	io::copy(&mut reader, &mut writer).await?;
 
-    Ok(())
+	Ok(())
 }
 
 #[async_std::main]
