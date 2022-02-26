@@ -1,7 +1,12 @@
 #![feature(associated_type_bounds)]
 
-//! Simple Usage example:
+//! Simple usage example:
 //! ```rust
+//! # use rkyv::{Infallible, Archived, AlignedVec, Archive, Serialize, Deserialize};
+//! # use rkyv_codec::{stream, RkyvWriter};
+//! # use bytecheck::CheckBytes;
+//! # use futures::SinkExt;
+//! # async_std::task::block_on(async {
 //! #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
 //! #[archive_attr(derive(CheckBytes, Debug))] // Checkbytes is required
 //! struct Test {
@@ -27,6 +32,7 @@
 //! let value_received: Test = data.deserialize(&mut Infallible).unwrap();
 //! 
 //! assert_eq!(value, value_received);
+//! # })
 //! ```
 
 use std::{
@@ -54,6 +60,7 @@ use rkyv::{
 	AlignedVec, Archive, Archived, Serialize,
 };
 
+/// Error type for rkyv_codec
 #[derive(Debug, Error)]
 pub enum PacketCodecError {
 	#[error(transparent)]
@@ -77,8 +84,11 @@ macro_rules! ready {
 	};
 }
 
-/// Reads a single `&Archived<Object>` into the passed buffer from an AsyncRead
+/// Reads a single `&Archived<Object>` from an `AsyncRead` using the passed buffer.
+/// 
 /// Until streaming iterators (and streaming futures) are implemented in rust, this currently the fastest method I could come up with that requires no recurring heap allocations.
+/// 
+/// Requires rkyv validation feature & CheckBytes
 pub async fn stream<'b, Inner: AsyncRead + Unpin, Packet>(
 	mut inner: &mut Inner,
 	buffer: &'b mut AlignedVec,
@@ -98,7 +108,7 @@ where
 	Ok(archive)
 }
 
-/// Wraps an `AsyncWrite` and implements `Sink` to serialize `Archive` objects. (Requires rkyv validation feature & CheckBytes)
+/// Wraps an `AsyncWrite` and implements `Sink` to serialize `Archive` objects.
 #[pin_project]
 pub struct RkyvWriter<Writer: AsyncWrite> {
 	#[pin]

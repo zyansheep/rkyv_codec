@@ -18,7 +18,7 @@ unsigned-varint = { version = "0.7.1", features = ["futures"] }
 async-std = { version = "1.10.0", features = ["attributes"] }
 
 [dev-dependencies]
-async-std = "*"
+async-std = "1.10"
 
 [features]
 
