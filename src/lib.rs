@@ -1,9 +1,10 @@
 #![feature(associated_type_bounds)]
+#![feature(test)]
 
 //! Simple usage example:
 //! ```rust
 //! # use rkyv::{Infallible, Archived, AlignedVec, Archive, Serialize, Deserialize};
-//! # use rkyv_codec::{stream, RkyvWriter};
+//! # use rkyv_codec::{archive_stream, RkyvWriter};
 //! # use bytecheck::CheckBytes;
 //! # use futures::SinkExt;
 //! # async_std::task::block_on(async {
@@ -28,12 +29,14 @@
 //! // Reading
 //! let mut reader = &codec.inner()[..];
 //! let mut buffer = AlignedVec::new(); // Aligned streaming buffer for re-use
-//! let data: &Archived<Test> = stream::<_, Test>(&mut reader, &mut buffer).await.unwrap(); // This returns a reference into the passed buffer
+//! let data: &Archived<Test> = archive_stream::<_, Test>(&mut reader, &mut buffer).await.unwrap(); // This returns a reference into the passed buffer
 //! let value_received: Test = data.deserialize(&mut Infallible).unwrap();
 //!
 //! assert_eq!(value, value_received);
 //! # })
 //! ```
+
+extern crate test;
 
 use std::{
 	ops::Range,
@@ -47,7 +50,7 @@ extern crate thiserror;
 extern crate pin_project;
 
 use bytecheck::CheckBytes;
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, Sink};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Sink};
 use rkyv::{
 	ser::{
 		serializers::{
@@ -93,7 +96,7 @@ macro_rules! ready {
 /// Until streaming iterators (and streaming futures) are implemented in rust, this currently the fastest method I could come up with that requires no recurring heap allocations.
 ///
 /// Requires rkyv validation feature & CheckBytes
-pub async fn stream<'b, Inner: AsyncRead + Unpin, Packet>(
+pub async fn archive_stream<'b, Inner: AsyncRead + Unpin, Packet>(
 	mut inner: &mut Inner,
 	buffer: &'b mut AlignedVec,
 ) -> Result<&'b Archived<Packet>, RkyvCodecError>
@@ -110,6 +113,14 @@ where
 	let archive = rkyv::check_archived_root::<'b, Packet>(buffer)
 		.map_err(|_| RkyvCodecError::CheckArchiveError)?;
 	Ok(archive)
+}
+
+pub async fn archive_sink<'b, Inner: AsyncWrite + Unpin, Packet: Archive> (inner: &mut Inner, archived: &[u8]) -> Result<(), RkyvCodecError> {
+	let length_buf = &mut unsigned_varint::encode::usize_buffer();
+	let length_buf = unsigned_varint::encode::usize(archived.len(), length_buf);
+	inner.write(length_buf).await?;
+	inner.write(archived).await?;
+	Ok(())
 }
 
 /// Wraps an `AsyncWrite` and implements `Sink` to serialize `Archive` objects.
@@ -210,45 +221,117 @@ where
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
 	use bytecheck::CheckBytes;
-	use futures::SinkExt;
-	use rkyv::{AlignedVec, Archive, Archived, Deserialize, Infallible, Serialize};
+	use futures::{AsyncRead, AsyncWrite, SinkExt, StreamExt, io::Cursor};
+	use futures_codec::{CborCodec, Framed};
+use rkyv::{AlignedVec, Archive, Archived, Deserialize, Infallible, Serialize};
 
-	use crate::{stream, RkyvWriter};
+	use crate::{RkyvWriter, archive_sink, archive_stream, futures_stream::RkyvCodec};
 
-	#[async_std::test]
-	async fn test_local() {
-		#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
-		// This will generate a PartialEq impl between our unarchived and archived types
-		#[archive(compare(PartialEq))]
-		// To use the safe API, you have to derive CheckBytes for the archived type
-		#[archive_attr(derive(CheckBytes, Debug))]
-		struct Test {
-			int: u8,
-			string: String,
-			option: Option<Vec<i32>>,
-		}
-		let value = Test {
+	#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+	// This will generate a PartialEq impl between our unarchived and archived types
+	#[archive(compare(PartialEq))]
+	// To use the safe API, you have to derive CheckBytes for the archived type
+	#[archive_attr(derive(CheckBytes, Debug))]
+	struct Test {
+		int: u8,
+		string: String,
+		option: Option<Vec<i32>>,
+	}
+
+	lazy_static::lazy_static! {
+		static ref TEST: Test = Test {
 			int: 42,
 			string: "hello world".to_string(),
 			option: Some(vec![1, 2, 3, 4]),
 		};
-		println!("starting test");
+	}
 
+	#[inline]
+	async fn sink_amount<W: AsyncWrite + Unpin>(mut writer: W, count: usize) {
+		let archive = rkyv::to_bytes::<_, 256>(&*TEST).unwrap();
+		for _ in 0..count {
+			archive_sink::<_, Test>(&mut writer, &archive).await.unwrap();
+		}
+	}
+	#[inline]
+	async fn stream_amount<R: AsyncRead + Unpin>(mut reader: R, count: usize, check: &Test) {
+		let mut buffer = AlignedVec::new();
+		for _ in 0..count {
+			let value = archive_stream::<_, Test>(&mut reader, &mut buffer).await.unwrap();
+			assert_eq!(value, check);
+		}
+		
+	}
+
+	#[async_std::test]
+	async fn ser_de() {
 		let writer = Vec::new();
 		let mut codec = RkyvWriter::new(writer);
-		codec.send(value.clone()).await.unwrap();
+		codec.send(TEST.clone()).await.unwrap();
 
 		let mut reader = &codec.inner()[..];
 
-		println!("serialized data: {:?}", reader);
 		let mut buffer = AlignedVec::new();
-		let data: &Archived<Test> = stream::<_, Test>(&mut reader, &mut buffer).await.unwrap();
+		let data: &Archived<Test> = archive_stream::<_, Test>(&mut reader, &mut buffer).await.unwrap();
 
 		let value_sent: Test = data.deserialize(&mut Infallible).unwrap();
 
-		assert_eq!(value, value_sent);
+		assert_eq!(*TEST, value_sent);
+	}
+	#[async_std::test]
+	async fn futures_ser_de() {
+		let codec = RkyvCodec::<Test>::default();
+		let mut buffer = vec![0u8; 256];
+		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
+		framed.send(TEST.clone()).await.unwrap();
+
+		let (_, codec) = framed.release();
+
+		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
+		let received_value = framed.next().await.unwrap().unwrap();
+		
+		assert_eq!(*TEST, received_value);
+		
+	}
+	#[async_std::test]
+	async fn futures_cbor_ser_de() {
+		let codec = CborCodec::<Test, Test>::new();
+
+		let mut buffer = vec![0u8; 256];
+		let mut framed = Framed::new(Cursor::new(&mut buffer), codec);
+
+		framed.send(TEST.clone()).await.unwrap();
+
+		let (_, codec) = framed.release();
+
+		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
+		let received_value = framed.next().await.unwrap().unwrap();
+		
+		assert_eq!(*TEST, received_value);
+	}
+
+	use test::Bencher;
+
+    #[bench]
+    fn bench_ser_de(b: &mut Bencher) {
+		async_std::task::block_on(async {
+			b.iter(ser_de);
+		})
+    }
+	#[bench]
+    fn bench_futures_ser_de(b: &mut Bencher) {
+		async_std::task::block_on(async {
+			b.iter(futures_ser_de);
+		})
+    }
+
+	#[bench]
+	fn bench_futures_cbor_ser_de(b: &mut Bencher) {
+		async_std::task::block_on(async {
+			b.iter(futures_cbor_ser_de);
+		})
 	}
 }
 

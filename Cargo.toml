@@ -15,11 +15,13 @@ futures = "0.3.21"
 pin-project = "1.0.10"
 thiserror = "1.0.30"
 unsigned-varint = { version = "0.7.1", features = ["futures"] }
-futures_codec = { version = "0.4.1", optional = true }
+futures_codec = { version = "0.4.1", features = ["cbor"], optional = true }
 bytes = { version = "0.5.5", optional = true }
+lazy_static = "1.4.0"
 
 [dev-dependencies]
 async-std = { version = "1.10", features = ["attributes"] }
+serde = "1.0.136"
 
 [features]
 default = ["futures_stream"]

@@ -1,16 +1,21 @@
 use std::marker::PhantomData;
 
 use bytecheck::CheckBytes;
-use bytes::buf::BufMutExt;
+use bytes::BufMut;
 use futures_codec::{BytesMut, Decoder, Encoder};
 use rkyv::{AlignedVec, Archive, Deserialize, Infallible, Serialize, ser::{Serializer, serializers::{AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch, SharedSerializeMap, WriteSerializer}}};
 
 use crate::RkyvCodecError;
 
-#[derive(Default)]
 pub struct RkyvCodec<Packet: Archive> {
 	_data: PhantomData<Packet>,
+    encode_buffer: AlignedVec,
     decode_buffer: AlignedVec,
+}
+impl<Packet: Archive> Default for RkyvCodec<Packet> {
+    fn default() -> Self {
+        Self { _data: PhantomData, encode_buffer: AlignedVec::new(), decode_buffer: AlignedVec::new() }
+    }
 }
 /// Encoder impl encodes object streams to bytes
 impl<Packet> Encoder for RkyvCodec<Packet>
@@ -18,7 +23,7 @@ where
 	Packet: Archive
 		+ for<'b> Serialize<
 			CompositeSerializer<
-				WriteSerializer<bytes::buf::ext::Writer<&'b mut BytesMut>>,
+				WriteSerializer<&'b mut AlignedVec>,
 				FallbackScratch<HeapScratch<0>, AllocScratch>,
 				SharedSerializeMap,
 			>,
@@ -28,17 +33,18 @@ where
 	type Error = RkyvCodecError;
 
 	fn encode(&mut self, data: Self::Item, buf: &mut BytesMut) -> Result<(), Self::Error> {
-		let writer = buf.writer();
-		let serializer = WriteSerializer::new(writer);
-		let mut serializer = CompositeSerializer::new(
+        self.encode_buffer.clear();
+		let serializer = WriteSerializer::new(&mut self.encode_buffer);
+		let _rkyv_root = CompositeSerializer::new(
 			serializer,
 			FallbackScratch::default(),
 			SharedSerializeMap::default(),
-		);
-		serializer
-			.serialize_value(&data)
-			.map_err(|_| RkyvCodecError::SerializeError)?;
-
+		).serialize_value(&data).map_err(|_| RkyvCodecError::SerializeError)?;
+        
+        let mut length_buffer = unsigned_varint::encode::usize_buffer();
+        let length_buffer = unsigned_varint::encode::usize(self.encode_buffer.len(), &mut length_buffer);
+        buf.put(length_buffer);
+        buf.put(&self.encode_buffer[..]);
 		Ok(())
 	}
 }
@@ -52,6 +58,7 @@ where
 	type Error = RkyvCodecError;
 
 	fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if buf.is_empty() { return Ok(None) }
 		self.decode_buffer.clear();
 
 		let (length, remaining) = unsigned_varint::decode::usize(buf).map_err(|_|RkyvCodecError::ReadLengthError)?;
