@@ -44,13 +44,12 @@ where
 	unsafe { buffer.set_len(archive_len); } // Safety: Already reserved the required space
 
 	inner.read_exact(buffer).await?;
-	println!("parsing buffer: {:?}", buffer);
 	let archive = rkyv::check_archived_root::<'b, Packet>(buffer).map_err(|_|PacketCodecError::CheckArchiveError)?;
 	Ok(archive)
 }
 
 #[pin_project]
-struct RkyvWriter<Writer: AsyncWrite> {
+pub struct RkyvWriter<Writer: AsyncWrite> {
 	#[pin] writer: Writer,
 	buffer: AlignedVec,
 	length_buffer: [u8; 10],
@@ -58,8 +57,8 @@ struct RkyvWriter<Writer: AsyncWrite> {
 	buf_state: usize, // Whether or not the aligned buf is being written and if so, how much so far
 }
 impl<Writer: AsyncWrite> RkyvWriter<Writer> {
-	fn new(writer: Writer) -> Self { Self { writer, buffer: AlignedVec::new(), length_buffer: [0u8; 10], len_state: Default::default(), buf_state: 0, } }
-	fn inner(self) -> Writer { self.writer }
+	pub fn new(writer: Writer) -> Self { Self { writer, buffer: AlignedVec::new(), length_buffer: [0u8; 10], len_state: Default::default(), buf_state: 0, } }
+	pub fn inner(self) -> Writer { self.writer }
 }
 
 impl<Writer: AsyncWrite, Packet> Sink<Packet> for RkyvWriter<Writer>
