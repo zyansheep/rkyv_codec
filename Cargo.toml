@@ -1,0 +1,51 @@
+[package]
+name = "rkyv_codec"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rkyv = { version = "0.7.33", features = ["validation"] }
+bytecheck = "0.6.7"
+futures = "0.3.21"
+pin-project = "1.0.10"
+thiserror = "1.0.30"
+unsigned-varint = { version = "0.7.1", features = ["futures"] }
+bytes = "1.1.0"
+
+[dev-dependencies]
+async-std = "*"
+
+[features]
+
+
+[package.metadata.nix]
+build = true
+nativeBuildInputs = [
+	"cargo-edit",
+	"lldb",
+	"pkg-config",
+	"cmake",
+]
+buildInputs = [
+	"libxkbcommon",
+	"x11",
+	"xorg.libX11",
+	"xorg.libXcursor",
+	"xorg.libXrandr",
+	"xorg.libXi",
+	"vulkan-tools",
+	"vulkan-headers",
+	"vulkan-loader",
+	"vulkan-validation-layers",
+	"fontconfig",
+	"freetype",
+	"protobuf",
+]
+runtimeLibs = [
+	"x11",
+	"xorg.libX11"
+]
+toolchain = "nightly"
+devshell = {name = "dither-sim-shell" }
