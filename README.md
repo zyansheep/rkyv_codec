@@ -22,7 +22,7 @@ To run:
 
 `cargo run --eaxmple chat_server`
 
-Simple Usage example:
+Simple usage example:
 ```rust
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
 #[archive_attr(derive(CheckBytes, Debug))] // Checkbytes is required
