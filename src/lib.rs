@@ -35,6 +35,7 @@ macro_rules! ready {
 }
 
 /// Reads a single Archived Packet into as passed buffer from an AsyncRead
+/// This is currently the fastest method I could come up with for streaming rkyv that requires no recurring heap allocations
 pub async fn stream<'b, Inner: AsyncRead + Unpin, Packet>(mut inner: &mut Inner, buffer: &'b mut AlignedVec) -> Result<&'b Archived<Packet>, PacketCodecError>
 where
 	Packet: rkyv::Archive<Archived: CheckBytes<DefaultValidator<'b>> + 'b>,
@@ -48,6 +49,7 @@ where
 	Ok(archive)
 }
 
+/// This structure wraps an AsyncWrite and implements Sink to serialize and write Archive objects.
 #[pin_project]
 pub struct RkyvWriter<Writer: AsyncWrite> {
 	#[pin] writer: Writer,
@@ -76,7 +78,7 @@ where
 		this.buffer.clear();
 		let serializer = WriteSerializer::new(this.buffer);
 		let mut serializer = CompositeSerializer::new(serializer, FallbackScratch::default(), SharedSerializeMap::default());
-		let _bytes_written = serializer.serialize_value(&item).map_err(|_|PacketCodecError::CheckArchiveError)?;
+		let _bytes_written = serializer.serialize_value(&item).map_err(|_|PacketCodecError::SerializeError)?;
 		
 		let bytes_written = serializer.into_serializer().into_inner().len();
 		*this.len_state = 0..unsigned_varint::encode::usize(bytes_written, this.length_buffer).len();
