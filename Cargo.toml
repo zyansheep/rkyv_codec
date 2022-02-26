@@ -27,14 +27,8 @@ async-std = "*"
 build = true
 nativeBuildInputs = [
 	"cargo-edit",
-	"lldb",
-	"pkg-config",
-	"cmake",
 ]
 buildInputs = []
-runtimeLibs = [
-	"x11",
-	"xorg.libX11"
-]
+runtimeLibs = []
 toolchain = "nightly"
 devshell = {name = "rust-shell" }

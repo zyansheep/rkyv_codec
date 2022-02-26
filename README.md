@@ -24,7 +24,7 @@ To run:
 
 Simple Usage example:
 ```rust
-#[derive(Archive, Deserialize, Serialize)]
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
 #[archive_attr(derive(CheckBytes, Debug))] // Checkbytes is required
 struct Test {
     int: u8,
@@ -36,7 +36,6 @@ let value = Test {
     string: "hello world".to_string(),
     option: Some(vec![1, 2, 3, 4]),
 };
-println!("starting test");
 
 // Writing
 let writer = Vec::new();

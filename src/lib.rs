@@ -1,5 +1,34 @@
 #![feature(associated_type_bounds)]
 
+//! Simple Usage example:
+//! ```rust
+//! #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
+//! #[archive_attr(derive(CheckBytes, Debug))] // Checkbytes is required
+//! struct Test {
+//!     int: u8,
+//!     string: String,
+//!     option: Option<Vec<i32>>,
+//! }
+//! let value = Test {
+//!     int: 42,
+//!     string: "hello world".to_string(),
+//!     option: Some(vec![1, 2, 3, 4]),
+//! };
+//! 
+//! // Writing
+//! let writer = Vec::new();
+//! let mut codec = RkyvWriter::new(writer);
+//! codec.send(value.clone()).await.unwrap();
+//! 
+//! // Reading
+//! let mut reader = &codec.inner()[..];
+//! let mut buffer = AlignedVec::new(); // Aligned streaming buffer for re-use
+//! let data: &Archived<Test> = stream::<_, Test>(&mut reader, &mut buffer).await.unwrap(); // This returns a reference into the passed buffer
+//! let value_received: Test = data.deserialize(&mut Infallible).unwrap();
+//! 
+//! assert_eq!(value, value_received);
+//! ```
+
 use std::{
 	ops::Range,
 	pin::Pin,
@@ -48,8 +77,8 @@ macro_rules! ready {
 	};
 }
 
-/// Reads a single Archived Packet into as passed buffer from an AsyncRead
-/// This is currently the fastest method I could come up with for streaming rkyv that requires no recurring heap allocations
+/// Reads a single `&Archived<Object>` into the passed buffer from an AsyncRead
+/// Until streaming iterators (and streaming futures) are implemented in rust, this currently the fastest method I could come up with that requires no recurring heap allocations.
 pub async fn stream<'b, Inner: AsyncRead + Unpin, Packet>(
 	mut inner: &mut Inner,
 	buffer: &'b mut AlignedVec,
@@ -69,7 +98,7 @@ where
 	Ok(archive)
 }
 
-/// This structure wraps an AsyncWrite and implements Sink to serialize and write Archive objects.
+/// Wraps an `AsyncWrite` and implements `Sink` to serialize `Archive` objects. (Requires rkyv validation feature & CheckBytes)
 #[pin_project]
 pub struct RkyvWriter<Writer: AsyncWrite> {
 	#[pin]
