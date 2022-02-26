@@ -31,24 +31,10 @@ nativeBuildInputs = [
 	"pkg-config",
 	"cmake",
 ]
-buildInputs = [
-	"libxkbcommon",
-	"x11",
-	"xorg.libX11",
-	"xorg.libXcursor",
-	"xorg.libXrandr",
-	"xorg.libXi",
-	"vulkan-tools",
-	"vulkan-headers",
-	"vulkan-loader",
-	"vulkan-validation-layers",
-	"fontconfig",
-	"freetype",
-	"protobuf",
-]
+buildInputs = []
 runtimeLibs = [
 	"x11",
 	"xorg.libX11"
 ]
 toolchain = "nightly"
-devshell = {name = "dither-sim-shell" }
+devshell = {name = "rust-shell" }
