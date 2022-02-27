@@ -5,7 +5,7 @@
 //! Simple usage example:
 //! ```rust
 //! # use rkyv::{Infallible, Archived, AlignedVec, Archive, Serialize, Deserialize};
-//! # use rkyv_codec::{archive_stream, RkyvWriter};
+//! # use rkyv_codec::{archive_stream, RkyvWriter, VarintLength};
 //! # use bytecheck::CheckBytes;
 //! # use futures::SinkExt;
 //! # async_std::task::block_on(async {
@@ -24,13 +24,13 @@
 //!
 //! // Writing
 //! let writer = Vec::new();
-//! let mut codec = RkyvWriter::new(writer);
+//! let mut codec = RkyvWriter::<_, VarintLength>::new(writer);
 //! codec.send(value.clone()).await.unwrap();
 //!
 //! // Reading
 //! let mut reader = &codec.inner()[..];
 //! let mut buffer = AlignedVec::new(); // Aligned streaming buffer for re-use
-//! let data: &Archived<Test> = archive_stream::<_, Test>(&mut reader, &mut buffer).await.unwrap(); // This returns a reference into the passed buffer
+//! let data: &Archived<Test> = archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer).await.unwrap(); // This returns a reference into the passed buffer
 //! let value_received: Test = data.deserialize(&mut Infallible).unwrap();
 //!
 //! assert_eq!(value, value_received);
@@ -55,7 +55,7 @@ mod futures_stream;
 use bytecheck::CheckBytes;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Sink};
 use length_codec::LengthCodec;
-use rkyv::{AlignedVec, Archive, Archived, Serialize, ser::{Serializer, serializers::{AlignedSerializer, AllocScratch, BufferScratch, CompositeSerializer, FallbackScratch, HeapScratch, SharedSerializeMap, WriteSerializer}}, validation::{validators::DefaultValidator}};
+use rkyv::{AlignedVec, Archive, Archived, Serialize, ser::{Serializer, serializers::{AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch, SharedSerializeMap}}, validation::{validators::DefaultValidator}};
 
 /// Error type for rkyv_codec
 #[derive(Debug, Error)]
@@ -101,14 +101,19 @@ pub async unsafe fn unsafe_archive_stream<'b, Inner: AsyncRead + Unpin, Packet: 
 	buffer: &'b mut AlignedVec,
 ) -> Result<&'b Archived<Packet>, RkyvCodecError> {
 	buffer.clear();
+
+	// Read Length
 	let mut length_buf = L::Buffer::default();
 	let length_buf = L::as_slice(&mut length_buf);
 	inner.read_exact(&mut length_buf[..]).await?;
 	let (archive_len, remaining) = L::decode(length_buf).map_err(|_|RkyvCodecError::ReadLengthError)?;
+	
+	// Reserve buffer
 	buffer.reserve(archive_len - buffer.len()); // Reserve at least the amount of bytes needed
 	// Safety: Already reserved the required space
 	unsafe { buffer.set_len(archive_len); }
-	buffer.extend_from_slice(remaining);
+
+	buffer[0..remaining.len()].copy_from_slice(remaining); // Copy unread length_buf bytes to buffer
 
 	inner.read_exact(&mut buffer[remaining.len()..]).await?;
 	unsafe { Ok(rkyv::archived_root::<Packet>(buffer)) }
@@ -127,16 +132,21 @@ where
 	Packet: rkyv::Archive<Archived: CheckBytes<DefaultValidator<'b>> + 'b>,
 {
 	buffer.clear();
+
+	// Read length
 	let mut length_buf = L::Buffer::default();
 	let length_buf = L::as_slice(&mut length_buf);
 	inner.read_exact(length_buf).await?;
 	let (archive_len, remaining) = L::decode(length_buf).map_err(|_|RkyvCodecError::ReadLengthError)?;
-	buffer.reserve(archive_len - buffer.len()); // Reserve at least the amount of bytes needed
+
+	// Reserve buffer
+	buffer.reserve(archive_len - buffer.len()); // Reserve at least the amount of bytes needed for packet
 	// Safety: Already reserved the required space
 	unsafe { buffer.set_len(archive_len); }
-	buffer.extend_from_slice(remaining);
 
-	inner.read_exact(&mut buffer[remaining.len()..]).await?;
+	// Read into aligned buffer
+	buffer[0..remaining.len()].copy_from_slice(remaining); // Copy unread length_buf bytes to buffer
+	inner.read_exact(&mut buffer[remaining.len()..]).await?; // Read into buffer after the appended bytes
 
 	let archive = rkyv::check_archived_root::<'b, Packet>(buffer)
 		.map_err(|_| RkyvCodecError::CheckArchiveError)?;
@@ -195,22 +205,24 @@ where
 	fn start_send(self: Pin<&mut Self>, item: Packet) -> Result<(), Self::Error> {
 		let this = self.project();
 		this.buffer.clear();
-		let serializer = AlignedSerializer::new(this.buffer.borrow_mut());
+		
+		// Construct Serializer
 		let mut serializer = CompositeSerializer::new(
-			serializer,
+			AlignedSerializer::new(this.buffer.borrow_mut()),
 			this.scratch.take().unwrap(),
 			this.shared.take().unwrap(),
 		);
 		
-		let _bytes_written = serializer
+		serializer
 			.serialize_value(&item)
 			.map_err(|_| RkyvCodecError::SerializeError)?;
 
-		let (serializer, scratch, shared) = serializer.into_components();
+		// Deconstruct composite serializer
+		let (_, scratch, shared) = serializer.into_components();
 		*this.scratch = Some(scratch); *this.shared = Some(shared);
-		let bytes_written = serializer.into_inner().len();
+		
 		*this.len_state =
-			0..L::encode(bytes_written, this.length_buffer).len();
+			0..L::encode(this.buffer.len(), this.length_buffer).len();
 		*this.buf_state = 0;
 		Ok(())
 	}
@@ -221,6 +233,7 @@ where
 		let len_state = this.len_state;
 		if len_state.start <= len_state.end {
 			let length_buffer = L::as_slice(&mut this.length_buffer);
+			let length_buffer = &mut length_buffer[len_state.clone()];
 
 			let written = ready!(Pin::new(&mut this.writer).poll_write(cx, length_buffer)?);
 			len_state.start += written;
@@ -321,10 +334,8 @@ mod tests {
 
 		let mut buffer = AlignedVec::with_capacity(256);
 		let data: &Archived<Test> = archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer).await.unwrap();
-
-		let value_sent: Test = data.deserialize(&mut Infallible).unwrap();
-
-		assert_eq!(*TEST, value_sent);
+		
+		assert_eq!(*TEST, *data);
 	}
 
 	#[async_std::test]
