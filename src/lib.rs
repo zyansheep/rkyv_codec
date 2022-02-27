@@ -1,4 +1,5 @@
 #![feature(associated_type_bounds)]
+#![feature(generic_associated_types)]
 #![feature(test)]
 
 //! Simple usage example:
@@ -38,30 +39,23 @@
 
 extern crate test;
 
-use std::{
-	ops::Range,
-	pin::Pin,
-	task::{Context, Poll},
-};
+use std::{borrow::BorrowMut, ops::Range, pin::Pin, task::{Context, Poll}};
 
 #[macro_use]
 extern crate thiserror;
 #[macro_use]
 extern crate pin_project;
 
+mod length_codec;
+pub use length_codec::*;
+
+#[cfg(feature = "futures_stream")]
+mod futures_stream;
+
 use bytecheck::CheckBytes;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Sink};
-use rkyv::{
-	ser::{
-		serializers::{
-			AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch, SharedSerializeMap,
-			WriteSerializer,
-		},
-		Serializer,
-	},
-	validation::validators::DefaultValidator,
-	AlignedVec, Archive, Archived, Serialize,
-};
+use length_codec::LengthCodec;
+use rkyv::{AlignedVec, Archive, Archived, Serialize, ser::{Serializer, serializers::{AlignedSerializer, AllocScratch, BufferScratch, CompositeSerializer, FallbackScratch, HeapScratch, SharedSerializeMap, WriteSerializer}}, validation::{validators::DefaultValidator}};
 
 /// Error type for rkyv_codec
 #[derive(Debug, Error)]
@@ -70,6 +64,7 @@ pub enum RkyvCodecError {
 	IoError(#[from] futures::io::Error),
 	#[error("Packet not correctly archived")]
 	CheckArchiveError,
+
 	#[error("Failed to Serialize")]
 	SerializeError,
 	#[error("Failed to parse length")]
@@ -91,56 +86,85 @@ macro_rules! ready {
 	};
 }
 
+/// Rewrites a single buffer representing an Archive to an `AsyncWrite`
+pub async fn archive_sink<'b, Inner: AsyncWrite + Unpin, L: LengthCodec> (inner: &mut Inner, archived: &[u8]) -> Result<(), RkyvCodecError> {
+	let length_buf = &mut L::Buffer::default();
+	let length_buf = L::encode(archived.len(), length_buf);
+	inner.write(length_buf).await?;
+	inner.write(archived).await?;
+	Ok(())
+}
+/// Reads a single `&Archived<Object>` from an AsyncRead without checking for correct byte formatting
+/// This will cause undefined behavior if the bytestream is not the correct format (i.e. not generated through archive_sink or RkyvWriter)
+pub async unsafe fn unsafe_archive_stream<'b, Inner: AsyncRead + Unpin, Packet: Archive + 'b, L: LengthCodec>(
+	inner: &mut Inner,
+	buffer: &'b mut AlignedVec,
+) -> Result<&'b Archived<Packet>, RkyvCodecError> {
+	buffer.clear();
+	let mut length_buf = L::Buffer::default();
+	let length_buf = L::as_slice(&mut length_buf);
+	inner.read_exact(&mut length_buf[..]).await?;
+	let (archive_len, remaining) = L::decode(length_buf).map_err(|_|RkyvCodecError::ReadLengthError)?;
+	buffer.reserve(archive_len - buffer.len()); // Reserve at least the amount of bytes needed
+	// Safety: Already reserved the required space
+	unsafe { buffer.set_len(archive_len); }
+	buffer.extend_from_slice(remaining);
+
+	inner.read_exact(&mut buffer[remaining.len()..]).await?;
+	unsafe { Ok(rkyv::archived_root::<Packet>(buffer)) }
+}
+
 /// Reads a single `&Archived<Object>` from an `AsyncRead` using the passed buffer.
 ///
 /// Until streaming iterators (and streaming futures) are implemented in rust, this currently the fastest method I could come up with that requires no recurring heap allocations.
 ///
 /// Requires rkyv validation feature & CheckBytes
-pub async fn archive_stream<'b, Inner: AsyncRead + Unpin, Packet>(
-	mut inner: &mut Inner,
+pub async fn archive_stream<'b, Inner: AsyncRead + Unpin, Packet, L: LengthCodec>(
+	inner: &mut Inner,
 	buffer: &'b mut AlignedVec,
 ) -> Result<&'b Archived<Packet>, RkyvCodecError>
 where
 	Packet: rkyv::Archive<Archived: CheckBytes<DefaultValidator<'b>> + 'b>,
 {
-	let archive_len = unsigned_varint::aio::read_usize(&mut inner).await.map_err(|_|RkyvCodecError::ReadLengthError)?;
+	buffer.clear();
+	let mut length_buf = L::Buffer::default();
+	let length_buf = L::as_slice(&mut length_buf);
+	inner.read_exact(length_buf).await?;
+	let (archive_len, remaining) = L::decode(length_buf).map_err(|_|RkyvCodecError::ReadLengthError)?;
 	buffer.reserve(archive_len - buffer.len()); // Reserve at least the amount of bytes needed
-	unsafe {
-		buffer.set_len(archive_len);
-	} // Safety: Already reserved the required space
+	// Safety: Already reserved the required space
+	unsafe { buffer.set_len(archive_len); }
+	buffer.extend_from_slice(remaining);
 
-	inner.read_exact(buffer).await?;
+	inner.read_exact(&mut buffer[remaining.len()..]).await?;
+
 	let archive = rkyv::check_archived_root::<'b, Packet>(buffer)
 		.map_err(|_| RkyvCodecError::CheckArchiveError)?;
 	Ok(archive)
 }
 
-pub async fn archive_sink<'b, Inner: AsyncWrite + Unpin, Packet: Archive> (inner: &mut Inner, archived: &[u8]) -> Result<(), RkyvCodecError> {
-	let length_buf = &mut unsigned_varint::encode::usize_buffer();
-	let length_buf = unsigned_varint::encode::usize(archived.len(), length_buf);
-	inner.write(length_buf).await?;
-	inner.write(archived).await?;
-	Ok(())
-}
-
 /// Wraps an `AsyncWrite` and implements `Sink` to serialize `Archive` objects.
 #[pin_project]
-pub struct RkyvWriter<Writer: AsyncWrite> {
+pub struct RkyvWriter<Writer: AsyncWrite, L: LengthCodec> {
 	#[pin]
 	writer: Writer,
 	buffer: AlignedVec,
-	length_buffer: [u8; 10],
+	length_buffer: L::Buffer,
 	len_state: Range<usize>, // How much of the length buffer has been written
 	buf_state: usize, // Whether or not the aligned buf is being written and if so, how much so far
+	scratch: Option<FallbackScratch<HeapScratch<256>, AllocScratch>>,
+	shared: Option<SharedSerializeMap>,
 }
-impl<Writer: AsyncWrite> RkyvWriter<Writer> {
+impl<Writer: AsyncWrite, L: LengthCodec> RkyvWriter<Writer, L> {
 	pub fn new(writer: Writer) -> Self {
 		Self {
 			writer,
 			buffer: AlignedVec::new(),
-			length_buffer: [0u8; 10],
+			length_buffer: L::Buffer::default(),
 			len_state: Default::default(),
 			buf_state: 0,
+			scratch: Some(FallbackScratch::new(HeapScratch::new(), AllocScratch::default())),
+			shared: Some(SharedSerializeMap::new()),
 		}
 	}
 	pub fn inner(self) -> Writer {
@@ -148,13 +172,13 @@ impl<Writer: AsyncWrite> RkyvWriter<Writer> {
 	}
 }
 
-impl<Writer: AsyncWrite, Packet> Sink<Packet> for RkyvWriter<Writer>
+impl<Writer: AsyncWrite, Packet, L: LengthCodec> Sink<Packet> for RkyvWriter<Writer, L>
 where
 	Packet: Archive
 		+ for<'b> Serialize<
 			CompositeSerializer<
-				WriteSerializer<&'b mut AlignedVec>,
-				FallbackScratch<HeapScratch<0>, AllocScratch>,
+				AlignedSerializer<&'b mut AlignedVec>,
+				FallbackScratch<HeapScratch<256>, AllocScratch>,
 				SharedSerializeMap,
 			>,
 		>,
@@ -171,19 +195,22 @@ where
 	fn start_send(self: Pin<&mut Self>, item: Packet) -> Result<(), Self::Error> {
 		let this = self.project();
 		this.buffer.clear();
-		let serializer = WriteSerializer::new(this.buffer);
+		let serializer = AlignedSerializer::new(this.buffer.borrow_mut());
 		let mut serializer = CompositeSerializer::new(
 			serializer,
-			FallbackScratch::default(),
-			SharedSerializeMap::default(),
+			this.scratch.take().unwrap(),
+			this.shared.take().unwrap(),
 		);
+		
 		let _bytes_written = serializer
 			.serialize_value(&item)
 			.map_err(|_| RkyvCodecError::SerializeError)?;
 
-		let bytes_written = serializer.into_serializer().into_inner().len();
+		let (serializer, scratch, shared) = serializer.into_components();
+		*this.scratch = Some(scratch); *this.shared = Some(shared);
+		let bytes_written = serializer.into_inner().len();
 		*this.len_state =
-			0..unsigned_varint::encode::usize(bytes_written, this.length_buffer).len();
+			0..L::encode(bytes_written, this.length_buffer).len();
 		*this.buf_state = 0;
 		Ok(())
 	}
@@ -193,7 +220,7 @@ where
 
 		let len_state = this.len_state;
 		if len_state.start <= len_state.end {
-			let length_buffer = &this.length_buffer[len_state.clone()];
+			let length_buffer = L::as_slice(&mut this.length_buffer);
 
 			let written = ready!(Pin::new(&mut this.writer).poll_write(cx, length_buffer)?);
 			len_state.start += written;
@@ -222,12 +249,13 @@ where
 
 #[cfg(test)]
 mod tests {
+	use async_std::task::block_on;
 	use bytecheck::CheckBytes;
 	use futures::{AsyncRead, AsyncWrite, SinkExt, StreamExt, io::Cursor};
 	use futures_codec::{CborCodec, Framed};
-use rkyv::{AlignedVec, Archive, Archived, Deserialize, Infallible, Serialize};
+	use rkyv::{AlignedVec, Archive, Archived, Deserialize, Infallible, Serialize};
 
-	use crate::{RkyvWriter, archive_sink, archive_stream, futures_stream::RkyvCodec};
+	use crate::{RkyvWriter, archive_sink, archive_stream, futures_stream::RkyvCodec, length_codec::VarintLength};
 
 	#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 	// This will generate a PartialEq impl between our unarchived and archived types
@@ -246,43 +274,62 @@ use rkyv::{AlignedVec, Archive, Archived, Deserialize, Infallible, Serialize};
 			string: "hello world".to_string(),
 			option: Some(vec![1, 2, 3, 4]),
 		};
+		static ref TEST_BYTES: &'static [u8] = {
+			let vec = rkyv::to_bytes::<_, 256>(&*TEST).unwrap();
+			Box::leak(vec.into_boxed_slice())
+		};
+		static ref TEST_ARCHIVED: &'static Archived<Test> = unsafe { rkyv::archived_root::<Test>(*TEST_BYTES) };
 	}
 
 	#[inline]
-	async fn sink_amount<W: AsyncWrite + Unpin>(mut writer: W, count: usize) {
-		let archive = rkyv::to_bytes::<_, 256>(&*TEST).unwrap();
+	async fn gen_amount<W: AsyncWrite + Unpin>(writer: &mut W, count: usize) {
 		for _ in 0..count {
-			archive_sink::<_, Test>(&mut writer, &archive).await.unwrap();
+			archive_sink::<_, VarintLength>(writer, *TEST_BYTES).await.unwrap();
 		}
 	}
 	#[inline]
-	async fn stream_amount<R: AsyncRead + Unpin>(mut reader: R, count: usize, check: &Test) {
+	async fn consume_amount<R: AsyncRead + Unpin>(mut reader: R, count: usize) {
 		let mut buffer = AlignedVec::new();
 		for _ in 0..count {
-			let value = archive_stream::<_, Test>(&mut reader, &mut buffer).await.unwrap();
-			assert_eq!(value, check);
+			let value = archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer).await.unwrap();
+			assert_eq!(*TEST, *value);
 		}
-		
 	}
 
 	#[async_std::test]
-	async fn ser_de() {
-		let writer = Vec::new();
-		let mut codec = RkyvWriter::new(writer);
-		codec.send(TEST.clone()).await.unwrap();
+	async fn functions() {
+		let mut writer = Vec::new();
+		archive_sink::<_, VarintLength>(&mut writer, *TEST_BYTES).await.unwrap();
 
-		let mut reader = &codec.inner()[..];
+		let mut reader = &writer[..];
 
-		let mut buffer = AlignedVec::new();
-		let data: &Archived<Test> = archive_stream::<_, Test>(&mut reader, &mut buffer).await.unwrap();
+		let mut buffer = AlignedVec::with_capacity(256);
+		let data: &Archived<Test> = archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer).await.unwrap();
 
 		let value_sent: Test = data.deserialize(&mut Infallible).unwrap();
 
 		assert_eq!(*TEST, value_sent);
 	}
+
+	#[async_std::test]
+	async fn rkyv_writer() {
+		let mut writer = Vec::new();
+		let mut sink = RkyvWriter::<_, VarintLength>::new(&mut writer);
+		sink.send(TEST.clone()).await.unwrap();
+
+		let mut reader = &writer[..];
+
+		let mut buffer = AlignedVec::with_capacity(256);
+		let data: &Archived<Test> = archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer).await.unwrap();
+
+		let value_sent: Test = data.deserialize(&mut Infallible).unwrap();
+
+		assert_eq!(*TEST, value_sent);
+	}
+
 	#[async_std::test]
 	async fn futures_ser_de() {
-		let codec = RkyvCodec::<Test>::default();
+		let codec = RkyvCodec::<Test, VarintLength>::default();
 		let mut buffer = vec![0u8; 256];
 		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
 		framed.send(TEST.clone()).await.unwrap();
@@ -314,26 +361,42 @@ use rkyv::{AlignedVec, Archive, Archived, Deserialize, Infallible, Serialize};
 
 	use test::Bencher;
 
-    #[bench]
-    fn bench_ser_de(b: &mut Bencher) {
-		async_std::task::block_on(async {
+	#[bench]
+	fn bench_length_encoding(b: &mut Bencher) {
+		block_on(async {
+			b.iter(functions)
+		})
+	}
+
+	/* #[bench]
+	fn bench_functions(b: &mut Bencher) {
+		block_on(async {
 			b.iter(ser_de);
 		})
-    }
+	} */
+
 	#[bench]
-    fn bench_futures_ser_de(b: &mut Bencher) {
-		async_std::task::block_on(async {
+	fn bench_futures_ser_de(b: &mut Bencher) {
+		block_on(async {
 			b.iter(futures_ser_de);
 		})
-    }
+	}
 
 	#[bench]
 	fn bench_futures_cbor_ser_de(b: &mut Bencher) {
-		async_std::task::block_on(async {
+		block_on(async {
 			b.iter(futures_cbor_ser_de);
 		})
 	}
-}
 
-#[cfg(feature = "futures_stream")]
-mod futures_stream;
+	#[bench]
+	fn bench_functions_10(b: &mut Bencher) {
+		let mut buffer = Vec::with_capacity(1024);
+		b.iter(||block_on(async {
+			let mut cursor = Cursor::new(&mut buffer);
+			gen_amount(&mut cursor, 10).await;
+			let buffer = cursor.into_inner();
+			consume_amount(Cursor::new(buffer), 10).await;
+		}))
+	}
+}

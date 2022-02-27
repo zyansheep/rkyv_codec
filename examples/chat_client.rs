@@ -7,7 +7,7 @@ use async_std::{prelude::*, task};
 use bytecheck::CheckBytes;
 use futures::SinkExt;
 use rkyv::{AlignedVec, Archive, Deserialize, Infallible, Serialize};
-use rkyv_codec::{archive_stream, RkyvWriter};
+use rkyv_codec::{RkyvWriter, VarintLength, archive_stream};
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
 // This will generate a PartialEq impl between our unarchived and archived types
@@ -36,11 +36,11 @@ async fn main() -> io::Result<()> {
 	let mut tcp_stream = TcpStream::connect("127.0.0.1:8080").await?;
 	println!("Connected to {}", &tcp_stream.peer_addr()?);
 
-	let mut sender = RkyvWriter::new(tcp_stream.clone());
+	let mut sender = RkyvWriter::<_, VarintLength>::new(tcp_stream.clone());
 
 	task::spawn(async move {
 		let mut buffer = AlignedVec::new();
-		while let Ok(message) = archive_stream::<_, ChatMessage>(&mut tcp_stream, &mut buffer).await {
+		while let Ok(message) = archive_stream::<_, ChatMessage, VarintLength>(&mut tcp_stream, &mut buffer).await {
 			let message: ChatMessage = message.deserialize(&mut Infallible).unwrap();
 			println!("{}", message);
 		}

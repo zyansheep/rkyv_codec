@@ -50,3 +50,13 @@ let value_received: Test = data.deserialize(&mut Infallible).unwrap();
 
 assert_eq!(value, value_received);
 ```
+
+## Benchmarks
+
+These are a set of benchmarks, each benchmark represents 10 test objects being sent or received.
+```
+test tests::bench_futures_cbor_ser_de ... bench:       1,662 ns/iter (+/- 1,149)
+test tests::bench_futures_ser_de      ... bench:       1,250 ns/iter (+/- 194)
+test tests::bench_ser_de              ... bench:         639 ns/iter (+/- 68)
+test tests::bench_ser_de_10           ... bench:       2,532 ns/iter (+/- 253)
+```
