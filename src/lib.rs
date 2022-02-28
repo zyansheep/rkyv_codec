@@ -39,15 +39,21 @@
 
 extern crate test;
 
-use std::{borrow::BorrowMut, ops::Range, pin::Pin, task::{Context, Poll}};
+use std::{
+	borrow::BorrowMut,
+	ops::Range,
+	pin::Pin,
+	task::{Context, Poll},
+};
 
 #[macro_use]
 extern crate thiserror;
 #[macro_use]
 extern crate pin_project;
 
-mod length_codec;
-pub use length_codec::*;
+/// Abstract length encodings for reading and writing streams
+pub mod length_codec;
+pub use length_codec::VarintLength;
 
 #[cfg(feature = "futures_stream")]
 mod futures_stream;
@@ -55,7 +61,17 @@ mod futures_stream;
 use bytecheck::CheckBytes;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Sink};
 use length_codec::LengthCodec;
-use rkyv::{AlignedVec, Archive, Archived, Serialize, ser::{Serializer, serializers::{AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch, SharedSerializeMap}}, validation::{validators::DefaultValidator}};
+use rkyv::{
+	ser::{
+		serializers::{
+			AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
+			SharedSerializeMap,
+		},
+		Serializer,
+	},
+	validation::validators::DefaultValidator,
+	AlignedVec, Archive, Archived, Serialize,
+};
 
 /// Error type for rkyv_codec
 #[derive(Debug, Error)]
@@ -87,16 +103,25 @@ macro_rules! ready {
 }
 
 /// Rewrites a single buffer representing an Archive to an `AsyncWrite`
-pub async fn archive_sink<'b, Inner: AsyncWrite + Unpin, L: LengthCodec> (inner: &mut Inner, archived: &[u8]) -> Result<(), RkyvCodecError> {
+pub async fn archive_sink<'b, Inner: AsyncWrite + Unpin, L: LengthCodec>(
+	inner: &mut Inner,
+	archived: &[u8],
+) -> Result<(), RkyvCodecError> {
 	let length_buf = &mut L::Buffer::default();
 	let length_buf = L::encode(archived.len(), length_buf);
-	inner.write(length_buf).await?;
-	inner.write(archived).await?;
+	inner.write_all(length_buf).await?;
+	inner.write_all(archived).await?;
 	Ok(())
 }
-/// Reads a single `&Archived<Object>` from an AsyncRead without checking for correct byte formatting
-/// This will cause undefined behavior if the bytestream is not the correct format (i.e. not generated through archive_sink or RkyvWriter)
-pub async unsafe fn unsafe_archive_stream<'b, Inner: AsyncRead + Unpin, Packet: Archive + 'b, L: LengthCodec>(
+/// Reads a single `&Archived<Object>` from an `AsyncRead` without checking for correct byte formatting
+/// # Safety
+/// This will cause undefined behavior if the bytestream is not the correct format (i.e. not generated through `archive_sink`, `RkyvWriter`, or `RkyvCodec`) 
+pub async unsafe fn unsafe_archive_stream<
+	'b,
+	Inner: AsyncRead + Unpin,
+	Packet: Archive + 'b,
+	L: LengthCodec,
+>(
 	inner: &mut Inner,
 	buffer: &'b mut AlignedVec,
 ) -> Result<&'b Archived<Packet>, RkyvCodecError> {
@@ -105,13 +130,16 @@ pub async unsafe fn unsafe_archive_stream<'b, Inner: AsyncRead + Unpin, Packet: 
 	// Read Length
 	let mut length_buf = L::Buffer::default();
 	let length_buf = L::as_slice(&mut length_buf);
-	inner.read_exact(&mut length_buf[..]).await?;
-	let (archive_len, remaining) = L::decode(length_buf).map_err(|_|RkyvCodecError::ReadLengthError)?;
-	
+	inner.read_exact(&mut *length_buf).await?;
+	let (archive_len, remaining) =
+		L::decode(length_buf).map_err(|_| RkyvCodecError::ReadLengthError)?;
+
 	// Reserve buffer
 	buffer.reserve(archive_len - buffer.len()); // Reserve at least the amount of bytes needed
-	// Safety: Already reserved the required space
-	unsafe { buffer.set_len(archive_len); }
+											// Safety: Already reserved the required space
+	unsafe {
+		buffer.set_len(archive_len);
+	}
 
 	buffer[0..remaining.len()].copy_from_slice(remaining); // Copy unread length_buf bytes to buffer
 
@@ -137,12 +165,15 @@ where
 	let mut length_buf = L::Buffer::default();
 	let length_buf = L::as_slice(&mut length_buf);
 	inner.read_exact(length_buf).await?;
-	let (archive_len, remaining) = L::decode(length_buf).map_err(|_|RkyvCodecError::ReadLengthError)?;
+	let (archive_len, remaining) =
+		L::decode(length_buf).map_err(|_| RkyvCodecError::ReadLengthError)?;
 
 	// Reserve buffer
 	buffer.reserve(archive_len - buffer.len()); // Reserve at least the amount of bytes needed for packet
-	// Safety: Already reserved the required space
-	unsafe { buffer.set_len(archive_len); }
+											// Safety: Already reserved the required space
+	unsafe {
+		buffer.set_len(archive_len);
+	}
 
 	// Read into aligned buffer
 	buffer[0..remaining.len()].copy_from_slice(remaining); // Copy unread length_buf bytes to buffer
@@ -173,7 +204,10 @@ impl<Writer: AsyncWrite, L: LengthCodec> RkyvWriter<Writer, L> {
 			length_buffer: L::Buffer::default(),
 			len_state: Default::default(),
 			buf_state: 0,
-			scratch: Some(FallbackScratch::new(HeapScratch::new(), AllocScratch::default())),
+			scratch: Some(FallbackScratch::new(
+				HeapScratch::new(),
+				AllocScratch::default(),
+			)),
 			shared: Some(SharedSerializeMap::new()),
 		}
 	}
@@ -205,24 +239,24 @@ where
 	fn start_send(self: Pin<&mut Self>, item: &Packet) -> Result<(), Self::Error> {
 		let this = self.project();
 		this.buffer.clear();
-		
+
 		// Construct Serializer
 		let mut serializer = CompositeSerializer::new(
 			AlignedSerializer::new(this.buffer.borrow_mut()),
 			this.scratch.take().unwrap(),
 			this.shared.take().unwrap(),
 		);
-		
+
 		serializer
 			.serialize_value(item)
 			.map_err(|_| RkyvCodecError::SerializeError)?;
 
 		// Deconstruct composite serializer
 		let (_, scratch, shared) = serializer.into_components();
-		*this.scratch = Some(scratch); *this.shared = Some(shared);
-		
-		*this.len_state =
-			0..L::encode(this.buffer.len(), this.length_buffer).len();
+		*this.scratch = Some(scratch);
+		*this.shared = Some(shared);
+
+		*this.len_state = 0..L::encode(this.buffer.len(), this.length_buffer).len();
 		*this.buf_state = 0;
 		Ok(())
 	}
@@ -232,7 +266,7 @@ where
 
 		let len_state = this.len_state;
 		if len_state.start <= len_state.end {
-			let length_buffer = L::as_slice(&mut this.length_buffer);
+			let length_buffer = L::as_slice(this.length_buffer);
 			let length_buffer = &mut length_buffer[len_state.clone()];
 
 			let written = ready!(Pin::new(&mut this.writer).poll_write(cx, length_buffer)?);
@@ -264,13 +298,22 @@ where
 mod tests {
 	use async_std::task::block_on;
 	use bytecheck::CheckBytes;
-	use futures::{AsyncRead, AsyncWrite, SinkExt, StreamExt, io::Cursor, TryStreamExt};
+	use futures::{io::Cursor, AsyncRead, AsyncWrite, SinkExt, StreamExt, TryStreamExt};
 	use futures_codec::{CborCodec, Framed};
-	use rkyv::{AlignedVec, Archive, Archived, Deserialize, Infallible, Serialize, to_bytes};
+	use rkyv::{to_bytes, AlignedVec, Archive, Archived, Deserialize, Infallible, Serialize};
 
-	use crate::{RkyvWriter, archive_sink, archive_stream, futures_stream::RkyvCodec, length_codec::{LengthCodec, VarintLength}};
+	use crate::{RkyvWriter, archive_sink, archive_stream, futures_stream::RkyvCodec, length_codec::{LengthCodec, U64Length, VarintLength}};
 
-	#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+	#[derive(
+		Archive,
+		Deserialize,
+		Serialize,
+		Debug,
+		PartialEq,
+		Clone,
+		serde::Serialize,
+		serde::Deserialize,
+	)]
 	// This will generate a PartialEq impl between our unarchived and archived types
 	#[archive(compare(PartialEq))]
 	// To use the safe API, you have to derive CheckBytes for the archived type
@@ -304,7 +347,9 @@ mod tests {
 	async fn consume_amount<R: AsyncRead + Unpin, L: LengthCodec>(mut reader: R, count: usize) {
 		let mut buffer = AlignedVec::new();
 		for _ in 0..count {
-			let value = archive_stream::<_, Test, L>(&mut reader, &mut buffer).await.unwrap();
+			let value = archive_stream::<_, Test, L>(&mut reader, &mut buffer)
+				.await
+				.unwrap();
 			assert_eq!(*TEST, *value);
 		}
 	}
@@ -312,12 +357,17 @@ mod tests {
 	#[async_std::test]
 	async fn functions() {
 		let mut writer = Vec::new();
-		archive_sink::<_, VarintLength>(&mut writer, *TEST_BYTES).await.unwrap();
+		archive_sink::<_, VarintLength>(&mut writer, *TEST_BYTES)
+			.await
+			.unwrap();
 
 		let mut reader = &writer[..];
 
 		let mut buffer = AlignedVec::with_capacity(256);
-		let data: &Archived<Test> = archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer).await.unwrap();
+		let data: &Archived<Test> =
+			archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer)
+				.await
+				.unwrap();
 
 		let value_sent: Test = data.deserialize(&mut Infallible).unwrap();
 
@@ -333,8 +383,11 @@ mod tests {
 		let mut reader = &writer[..];
 
 		let mut buffer = AlignedVec::with_capacity(256);
-		let data: &Archived<Test> = archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer).await.unwrap();
-		
+		let data: &Archived<Test> =
+			archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer)
+				.await
+				.unwrap();
+
 		assert_eq!(*TEST, *data);
 	}
 
@@ -349,9 +402,8 @@ mod tests {
 
 		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
 		let received_value = framed.next().await.unwrap().unwrap();
-		
+
 		assert_eq!(*TEST, received_value);
-		
 	}
 	#[async_std::test]
 	async fn futures_cbor_ser_de() {
@@ -366,7 +418,7 @@ mod tests {
 
 		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
 		let received_value = framed.next().await.unwrap().unwrap();
-		
+
 		assert_eq!(*TEST, received_value);
 	}
 
@@ -375,56 +427,70 @@ mod tests {
 	#[bench]
 	fn bench_varint_length_encoding(b: &mut Bencher) {
 		let mut buffer = Vec::with_capacity(1024);
-		b.iter(||block_on(async {
-			buffer.clear();
-			gen_amount::<_, VarintLength>(&mut buffer, 50).await;
-			consume_amount::<_, VarintLength>(&mut &buffer[..], 50).await;
-		}))
+		b.iter(|| {
+			block_on(async {
+				buffer.clear();
+				gen_amount::<_, VarintLength>(&mut buffer, 50).await;
+				consume_amount::<_, VarintLength>(&mut &buffer[..], 50).await;
+			})
+		})
 	}
 	#[bench]
 	fn bench_u64_length_encoding(b: &mut Bencher) {
 		let mut buffer = Vec::with_capacity(1024);
 
-		b.iter(||block_on(async {
-			buffer.clear();
-			gen_amount::<_, u64>(&mut buffer, 50).await;
-			consume_amount::<_, u64>(&mut &buffer[..], 50).await;
-		}))
+		b.iter(|| {
+			block_on(async {
+				buffer.clear();
+				gen_amount::<_, U64Length>(&mut buffer, 50).await;
+				consume_amount::<_, U64Length>(&mut &buffer[..], 50).await;
+			})
+		})
 	}
 	#[bench]
 	fn bench_archive_sink_prearchived_50(b: &mut Bencher) {
 		let mut buffer = Vec::with_capacity(1024);
-		b.iter(||block_on(async {
-			buffer.clear();
-			for _ in 0..50 {
-				archive_sink::<_, VarintLength>(&mut buffer, &*TEST_BYTES).await.unwrap()
-			}
-		}));
+		b.iter(|| {
+			block_on(async {
+				buffer.clear();
+				for _ in 0..50 {
+					archive_sink::<_, VarintLength>(&mut buffer, &*TEST_BYTES)
+						.await
+						.unwrap()
+				}
+			})
+		});
 		block_on(consume_amount::<_, VarintLength>(&mut &buffer[..], 50));
 	}
 	#[bench]
 	fn bench_archive_sink_50(b: &mut Bencher) {
 		let mut buffer = Vec::with_capacity(1024);
-		b.iter(||block_on(async {
-			buffer.clear();
-			
-			for _ in 0..50 {
-				let bytes = to_bytes::<_, 256>(&*TEST).unwrap(); // This makes it very slow
-				archive_sink::<_, VarintLength>(&mut buffer, &bytes).await.unwrap();
-			}
-		}));
+		b.iter(|| {
+			block_on(async {
+				buffer.clear();
+
+				for _ in 0..50 {
+					let bytes = to_bytes::<_, 256>(&*TEST).unwrap(); // This makes it very slow
+					archive_sink::<_, VarintLength>(&mut buffer, &bytes)
+						.await
+						.unwrap();
+				}
+			})
+		});
 		block_on(consume_amount::<_, VarintLength>(&mut &buffer[..], 50))
 	}
 	#[bench]
 	fn bench_rkyv_writer_50(b: &mut Bencher) {
 		let mut buffer = Vec::with_capacity(1024);
-		b.iter(||block_on(async {
-			buffer.clear();
-			let mut sink = RkyvWriter::<_, VarintLength>::new(&mut buffer);
-			for _ in 0..50 {
-				sink.send(&*TEST).await.unwrap();
-			}
-		}));
+		b.iter(|| {
+			block_on(async {
+				buffer.clear();
+				let mut sink = RkyvWriter::<_, VarintLength>::new(&mut buffer);
+				for _ in 0..50 {
+					sink.send(&*TEST).await.unwrap();
+				}
+			})
+		});
 		block_on(consume_amount::<_, VarintLength>(&mut &buffer[..], 50))
 	}
 	#[bench]
@@ -433,21 +499,25 @@ mod tests {
 
 		block_on(gen_amount::<_, VarintLength>(&mut buffer, 50));
 
-		b.iter(||block_on(async {
-			consume_amount::<_, VarintLength>(&mut &buffer[..], 50).await;
-		}));
+		b.iter(|| {
+			block_on(async {
+				consume_amount::<_, VarintLength>(&mut &buffer[..], 50).await;
+			})
+		});
 	}
 	#[bench]
 	fn bench_rkyv_futures_codec_sink_50(b: &mut Bencher) {
 		let mut buffer = Vec::with_capacity(1024);
-		b.iter(||block_on(async {
-			buffer.clear();
-			let codec = RkyvCodec::<Test, VarintLength>::default();
-			let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
-			for _ in 0..50 {
-				framed.send(TEST.clone()).await.unwrap();
-			}
-		}));
+		b.iter(|| {
+			block_on(async {
+				buffer.clear();
+				let codec = RkyvCodec::<Test, VarintLength>::default();
+				let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
+				for _ in 0..50 {
+					framed.send(TEST.clone()).await.unwrap();
+				}
+			})
+		});
 		block_on(consume_amount::<_, VarintLength>(&mut &buffer[..], 50));
 	}
 	#[bench]
@@ -458,23 +528,29 @@ mod tests {
 
 		let codec = RkyvCodec::<Test, VarintLength>::default();
 		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
-		b.iter(||block_on(async {
-			framed.set_position(0);
-			while let Some(_value) = framed.try_next().await.unwrap() {}
-		}));
+		b.iter(|| {
+			block_on(async {
+				framed.set_position(0);
+				while let Some(_value) = framed.try_next().await.unwrap() {}
+			})
+		});
 	}
 
 	#[bench]
 	fn bench_futures_cbor_sink_50(b: &mut Bencher) {
 		let mut buffer = vec![0u8; 256];
 
-		b.iter(||block_on(async {
-			buffer.clear();
-			let codec = CborCodec::<Test, Test>::new();
-			let mut framed = Framed::new(Cursor::new(&mut buffer), codec);
-			framed.set_position(0);
-			for _ in 0..50 { framed.send(TEST.clone()).await.unwrap(); }
-		}));
+		b.iter(|| {
+			block_on(async {
+				buffer.clear();
+				let codec = CborCodec::<Test, Test>::new();
+				let mut framed = Framed::new(Cursor::new(&mut buffer), codec);
+				framed.set_position(0);
+				for _ in 0..50 {
+					framed.send(TEST.clone()).await.unwrap();
+				}
+			})
+		});
 	}
 	#[bench]
 	fn bench_futures_cbor_stream_50(b: &mut Bencher) {
@@ -482,17 +558,23 @@ mod tests {
 
 		let mut buffer = vec![0u8; 256];
 		let mut framed = Framed::new(Cursor::new(&mut buffer), codec);
-		
+
 		block_on(async {
-			for _ in 0..50 { framed.send(TEST.clone()).await.unwrap(); }
+			for _ in 0..50 {
+				framed.send(TEST.clone()).await.unwrap();
+			}
 		});
 
 		let (_, codec) = framed.release();
 		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
 
-		b.iter(||block_on(async {
-			framed.set_position(0);
-			while let Some(value) = framed.next().await { test::black_box(value.unwrap()); }
-		}));
+		b.iter(|| {
+			block_on(async {
+				framed.set_position(0);
+				while let Some(value) = framed.next().await {
+					test::black_box(value.unwrap());
+				}
+			})
+		});
 	}
 }

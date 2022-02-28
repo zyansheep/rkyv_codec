@@ -11,7 +11,7 @@
 Simple async codec for [rkyv](https://github.com/rkyv/rkyv). Reuses streaming buffer for maximum speed!
 
 This crate provides a makeshift adaptor for streaming `&Archived<Object>`s from an `AsyncRead` using a reusable external buffer, as well as a `futures::Sink` implementation to serialize `Object`s to an `AsyncWrite`.
-It uses multiformat's [unsigned_varint](https://docs.rs/unsigned-varint/latest/unsigned_varint/) for variable-length length encoding.
+It uses multiformat's [unsigned_varint](https://docs.rs/unsigned-varint/latest/unsigned_varint/) for variable-length length encoding by default, but allows for other kinds of length encoding through the `LengthEncoding` trait.
 
 ## Examples
 This crate has two examples: chat_client & chat_server. Run both of them at the same time to see a proof-of-concept Archive tcp stream in action.
@@ -36,18 +36,15 @@ let value = Test {
     string: "hello world".to_string(),
     option: Some(vec![1, 2, 3, 4]),
 };
-
 // Writing
 let writer = Vec::new();
-let mut codec = RkyvWriter::new(writer);
-codec.send(value.clone()).await.unwrap();
-
+let mut codec = RkyvWriter::<_, VarintLength>::new(writer);
+codec.send(&value).await.unwrap();
 // Reading
 let mut reader = &codec.inner()[..];
 let mut buffer = AlignedVec::new(); // Aligned streaming buffer for re-use
-let data: &Archived<Test> = stream::<_, Test>(&mut reader, &mut buffer).await.unwrap(); // This returns a reference into the passed buffer
+let data: &Archived<Test> = archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer).await.unwrap(); // This returns a reference into the passed buffer
 let value_received: Test = data.deserialize(&mut Infallible).unwrap();
-
 assert_eq!(value, value_received);
 ```
 
