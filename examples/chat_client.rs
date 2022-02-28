@@ -62,7 +62,7 @@ async fn main() -> io::Result<()> {
 		past = now;
 		index += 1;
 
-		sender.send(message).await.unwrap();
+		sender.send(&message).await.unwrap();
 	}
 
 	Ok(())

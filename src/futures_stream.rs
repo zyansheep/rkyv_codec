@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use bytecheck::CheckBytes;
-use bytes::BufMut;
+use bytes::{Buf, BufMut};
 use futures_codec::{BytesMut, Decoder, Encoder};
 use rkyv::{AlignedVec, Archive, Deserialize, Infallible, Serialize, ser::{Serializer, serializers::{AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch, SharedSerializeMap, WriteSerializer}}};
 
@@ -66,6 +66,10 @@ where
 		self.decode_buffer.extend_from_slice(&remaining[0..length]);
 		let archive: &<Packet as Archive>::Archived = rkyv::check_archived_root::<'_, Packet>(&self.decode_buffer).map_err(|_|RkyvCodecError::CheckArchiveError)?;
 		let packet: Packet = archive.deserialize(&mut Infallible).unwrap();
+
+        let amount_read = length + buf.len() - remaining.len();
+        buf.advance(amount_read);
+        
         Ok(Some(packet))
 	}
 }

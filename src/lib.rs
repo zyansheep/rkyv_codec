@@ -25,7 +25,7 @@
 //! // Writing
 //! let writer = Vec::new();
 //! let mut codec = RkyvWriter::<_, VarintLength>::new(writer);
-//! codec.send(value.clone()).await.unwrap();
+//! codec.send(&value).await.unwrap();
 //!
 //! // Reading
 //! let mut reader = &codec.inner()[..];
@@ -182,7 +182,7 @@ impl<Writer: AsyncWrite, L: LengthCodec> RkyvWriter<Writer, L> {
 	}
 }
 
-impl<Writer: AsyncWrite, Packet, L: LengthCodec> Sink<Packet> for RkyvWriter<Writer, L>
+impl<Writer: AsyncWrite, Packet, L: LengthCodec> Sink<&Packet> for RkyvWriter<Writer, L>
 where
 	Packet: Archive
 		+ for<'b> Serialize<
@@ -202,7 +202,7 @@ where
 			.map_err(RkyvCodecError::IoError)
 	}
 
-	fn start_send(self: Pin<&mut Self>, item: Packet) -> Result<(), Self::Error> {
+	fn start_send(self: Pin<&mut Self>, item: &Packet) -> Result<(), Self::Error> {
 		let this = self.project();
 		this.buffer.clear();
 		
@@ -214,7 +214,7 @@ where
 		);
 		
 		serializer
-			.serialize_value(&item)
+			.serialize_value(item)
 			.map_err(|_| RkyvCodecError::SerializeError)?;
 
 		// Deconstruct composite serializer
@@ -264,11 +264,11 @@ where
 mod tests {
 	use async_std::task::block_on;
 	use bytecheck::CheckBytes;
-	use futures::{AsyncRead, AsyncWrite, SinkExt, StreamExt, io::Cursor};
+	use futures::{AsyncRead, AsyncWrite, SinkExt, StreamExt, io::Cursor, TryStreamExt};
 	use futures_codec::{CborCodec, Framed};
-	use rkyv::{AlignedVec, Archive, Archived, Deserialize, Infallible, Serialize};
+	use rkyv::{AlignedVec, Archive, Archived, Deserialize, Infallible, Serialize, to_bytes};
 
-	use crate::{RkyvWriter, archive_sink, archive_stream, futures_stream::RkyvCodec, length_codec::VarintLength};
+	use crate::{RkyvWriter, archive_sink, archive_stream, futures_stream::RkyvCodec, length_codec::{LengthCodec, VarintLength}};
 
 	#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 	// This will generate a PartialEq impl between our unarchived and archived types
@@ -295,16 +295,16 @@ mod tests {
 	}
 
 	#[inline]
-	async fn gen_amount<W: AsyncWrite + Unpin>(writer: &mut W, count: usize) {
+	async fn gen_amount<W: AsyncWrite + Unpin, L: LengthCodec>(writer: &mut W, count: usize) {
 		for _ in 0..count {
-			archive_sink::<_, VarintLength>(writer, *TEST_BYTES).await.unwrap();
+			archive_sink::<_, L>(writer, *TEST_BYTES).await.unwrap();
 		}
 	}
 	#[inline]
-	async fn consume_amount<R: AsyncRead + Unpin>(mut reader: R, count: usize) {
+	async fn consume_amount<R: AsyncRead + Unpin, L: LengthCodec>(mut reader: R, count: usize) {
 		let mut buffer = AlignedVec::new();
 		for _ in 0..count {
-			let value = archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer).await.unwrap();
+			let value = archive_stream::<_, Test, L>(&mut reader, &mut buffer).await.unwrap();
 			assert_eq!(*TEST, *value);
 		}
 	}
@@ -328,7 +328,7 @@ mod tests {
 	async fn rkyv_writer() {
 		let mut writer = Vec::new();
 		let mut sink = RkyvWriter::<_, VarintLength>::new(&mut writer);
-		sink.send(TEST.clone()).await.unwrap();
+		sink.send(&*TEST).await.unwrap();
 
 		let mut reader = &writer[..];
 
@@ -373,41 +373,126 @@ mod tests {
 	use test::Bencher;
 
 	#[bench]
-	fn bench_length_encoding(b: &mut Bencher) {
-		block_on(async {
-			b.iter(functions)
-		})
-	}
-
-	/* #[bench]
-	fn bench_functions(b: &mut Bencher) {
-		block_on(async {
-			b.iter(ser_de);
-		})
-	} */
-
-	#[bench]
-	fn bench_futures_ser_de(b: &mut Bencher) {
-		block_on(async {
-			b.iter(futures_ser_de);
-		})
-	}
-
-	#[bench]
-	fn bench_futures_cbor_ser_de(b: &mut Bencher) {
-		block_on(async {
-			b.iter(futures_cbor_ser_de);
-		})
-	}
-
-	#[bench]
-	fn bench_functions_10(b: &mut Bencher) {
+	fn bench_varint_length_encoding(b: &mut Bencher) {
 		let mut buffer = Vec::with_capacity(1024);
 		b.iter(||block_on(async {
-			let mut cursor = Cursor::new(&mut buffer);
-			gen_amount(&mut cursor, 10).await;
-			let buffer = cursor.into_inner();
-			consume_amount(Cursor::new(buffer), 10).await;
+			buffer.clear();
+			gen_amount::<_, VarintLength>(&mut buffer, 50).await;
+			consume_amount::<_, VarintLength>(&mut &buffer[..], 50).await;
 		}))
+	}
+	#[bench]
+	fn bench_u64_length_encoding(b: &mut Bencher) {
+		let mut buffer = Vec::with_capacity(1024);
+
+		b.iter(||block_on(async {
+			buffer.clear();
+			gen_amount::<_, u64>(&mut buffer, 50).await;
+			consume_amount::<_, u64>(&mut &buffer[..], 50).await;
+		}))
+	}
+	#[bench]
+	fn bench_archive_sink_prearchived_50(b: &mut Bencher) {
+		let mut buffer = Vec::with_capacity(1024);
+		b.iter(||block_on(async {
+			buffer.clear();
+			for _ in 0..50 {
+				archive_sink::<_, VarintLength>(&mut buffer, &*TEST_BYTES).await.unwrap()
+			}
+		}));
+		block_on(consume_amount::<_, VarintLength>(&mut &buffer[..], 50));
+	}
+	#[bench]
+	fn bench_archive_sink_50(b: &mut Bencher) {
+		let mut buffer = Vec::with_capacity(1024);
+		b.iter(||block_on(async {
+			buffer.clear();
+			
+			for _ in 0..50 {
+				let bytes = to_bytes::<_, 256>(&*TEST).unwrap(); // This makes it very slow
+				archive_sink::<_, VarintLength>(&mut buffer, &bytes).await.unwrap();
+			}
+		}));
+		block_on(consume_amount::<_, VarintLength>(&mut &buffer[..], 50))
+	}
+	#[bench]
+	fn bench_rkyv_writer_50(b: &mut Bencher) {
+		let mut buffer = Vec::with_capacity(1024);
+		b.iter(||block_on(async {
+			buffer.clear();
+			let mut sink = RkyvWriter::<_, VarintLength>::new(&mut buffer);
+			for _ in 0..50 {
+				sink.send(&*TEST).await.unwrap();
+			}
+		}));
+		block_on(consume_amount::<_, VarintLength>(&mut &buffer[..], 50))
+	}
+	#[bench]
+	fn bench_archive_stream_50(b: &mut Bencher) {
+		let mut buffer = Vec::with_capacity(1024);
+
+		block_on(gen_amount::<_, VarintLength>(&mut buffer, 50));
+
+		b.iter(||block_on(async {
+			consume_amount::<_, VarintLength>(&mut &buffer[..], 50).await;
+		}));
+	}
+	#[bench]
+	fn bench_rkyv_futures_codec_sink_50(b: &mut Bencher) {
+		let mut buffer = Vec::with_capacity(1024);
+		b.iter(||block_on(async {
+			buffer.clear();
+			let codec = RkyvCodec::<Test, VarintLength>::default();
+			let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
+			for _ in 0..50 {
+				framed.send(TEST.clone()).await.unwrap();
+			}
+		}));
+		block_on(consume_amount::<_, VarintLength>(&mut &buffer[..], 50));
+	}
+	#[bench]
+	fn bench_rkyv_futures_codec_stream_50(b: &mut Bencher) {
+		let mut buffer = Vec::with_capacity(1024);
+
+		block_on(gen_amount::<_, VarintLength>(&mut buffer, 50));
+
+		let codec = RkyvCodec::<Test, VarintLength>::default();
+		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
+		b.iter(||block_on(async {
+			framed.set_position(0);
+			while let Some(_value) = framed.try_next().await.unwrap() {}
+		}));
+	}
+
+	#[bench]
+	fn bench_futures_cbor_sink_50(b: &mut Bencher) {
+		let mut buffer = vec![0u8; 256];
+
+		b.iter(||block_on(async {
+			buffer.clear();
+			let codec = CborCodec::<Test, Test>::new();
+			let mut framed = Framed::new(Cursor::new(&mut buffer), codec);
+			framed.set_position(0);
+			for _ in 0..50 { framed.send(TEST.clone()).await.unwrap(); }
+		}));
+	}
+	#[bench]
+	fn bench_futures_cbor_stream_50(b: &mut Bencher) {
+		let codec = CborCodec::<Test, Test>::new();
+
+		let mut buffer = vec![0u8; 256];
+		let mut framed = Framed::new(Cursor::new(&mut buffer), codec);
+		
+		block_on(async {
+			for _ in 0..50 { framed.send(TEST.clone()).await.unwrap(); }
+		});
+
+		let (_, codec) = framed.release();
+		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
+
+		b.iter(||block_on(async {
+			framed.set_position(0);
+			while let Some(value) = framed.next().await { test::black_box(value.unwrap()); }
+		}));
 	}
 }

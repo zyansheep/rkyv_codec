@@ -33,9 +33,8 @@ impl LengthCodec for VarintLength {
 }
 
 /// Big-endian 32-bit length encoding, Note: can't handle numbers larger than a u32
-pub struct U32Length;
 pub struct NotEnoughBytesError;
-impl LengthCodec for U32Length {
+impl LengthCodec for u32 {
 	type Error = NotEnoughBytesError;
 	type Buffer = [u8; 4];
 
@@ -53,6 +52,27 @@ impl LengthCodec for U32Length {
 		if buf.len() < 4 { Err(NotEnoughBytesError) }
 		else {
 			Ok((buf.get_u32() as usize, buf))
+		}
+	}
+}
+impl LengthCodec for u64 {
+	type Error = NotEnoughBytesError;
+	type Buffer = [u8; 8];
+
+	#[inline]
+	fn as_slice(buffer: &mut Self::Buffer) -> &mut [u8] { &mut buffer[..] }
+
+	#[inline]
+	fn encode(length: usize, buf: &mut Self::Buffer) -> &[u8] {
+		(&mut buf[..]).put_u64(length as u64);
+		&buf[..]
+	}
+
+	#[inline]
+	fn decode(mut buf: &[u8]) -> Result<(usize, &[u8]), Self::Error> {
+		if buf.len() < 4 { Err(NotEnoughBytesError) }
+		else {
+			Ok((buf.get_u64() as usize, buf))
 		}
 	}
 }
