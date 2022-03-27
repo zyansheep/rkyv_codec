@@ -1,5 +1,3 @@
-use bytes::{Buf, BufMut};
-
 /// Length encoding trait, allows for different kinds of length encoding
 pub trait LengthCodec: 'static {
 	type Error;
@@ -50,17 +48,14 @@ impl LengthCodec for U32Length {
 
 	#[inline]
 	fn encode(length: usize, buf: &mut Self::Buffer) -> &[u8] {
-		(&mut buf[..]).put_u32(length as u32);
+		*buf = u32::to_be_bytes(length as u32);
 		&buf[..]
 	}
 
 	#[inline]
-	fn decode(mut buf: &[u8]) -> Result<(usize, &[u8]), Self::Error> {
-		if buf.len() < 4 {
-			Err(NotEnoughBytesError)
-		} else {
-			Ok((buf.get_u32() as usize, buf))
-		}
+	fn decode(buf: &[u8]) -> Result<(usize, &[u8]), Self::Error> {
+		let bytes: [u8; 4] = buf.try_into().map_err(|_|NotEnoughBytesError)?;
+		Ok((u32::from_be_bytes(bytes) as usize, &buf[4..]))
 	}
 }
 /// Big-endian 64-bit length encoding, can handle length up to 2^64
@@ -76,16 +71,13 @@ impl LengthCodec for U64Length {
 
 	#[inline]
 	fn encode(length: usize, buf: &mut Self::Buffer) -> &[u8] {
-		(&mut buf[..]).put_u64(length as u64);
+		*buf = u64::to_be_bytes(length as u64);
 		&buf[..]
 	}
 
 	#[inline]
-	fn decode(mut buf: &[u8]) -> Result<(usize, &[u8]), Self::Error> {
-		if buf.len() < 4 {
-			Err(NotEnoughBytesError)
-		} else {
-			Ok((buf.get_u64() as usize, buf))
-		}
+	fn decode(buf: &[u8]) -> Result<(usize, &[u8]), Self::Error> {
+		let bytes: [u8; 8] = buf.try_into().map_err(|_|NotEnoughBytesError)?;
+		Ok((u64::from_be_bytes(bytes) as usize, &buf[8..]))
 	}
 }

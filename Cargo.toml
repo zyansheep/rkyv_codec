@@ -16,7 +16,7 @@ pin-project = "1.0.10"
 thiserror = "1.0.30"
 unsigned-varint = { version = "0.7.1", features = ["futures"] }
 futures_codec = { version = "0.4.1", features = ["cbor"], optional = true }
-bytes = { version = "0.5.5", optional = true }
+bytes = { version = "1.1.0", optional = true }
 
 [dev-dependencies]
 async-std = { version = "1.10", features = ["attributes"] }
@@ -25,7 +25,8 @@ lazy_static = "1.4.0"
 
 [features]
 default = ["futures_stream"]
-futures_stream = ["futures_codec", "bytes"]
+no-std = ["bytes"]
+futures_stream = ["futures_codec"]
 
 [package.metadata.nix]
 build = true

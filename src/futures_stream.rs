@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use bytecheck::CheckBytes;
-use bytes::{Buf, BufMut};
+use bytes_old::Buf;
 use futures_codec::{BytesMut, Decoder, Encoder};
 use rkyv::{
 	ser::{
@@ -60,8 +60,8 @@ where
 
 		let mut length_buffer = L::Buffer::default();
 		let length_buffer = L::encode(self.encode_buffer.len(), &mut length_buffer);
-		buf.put(length_buffer);
-		buf.put(&self.encode_buffer[..]);
+		buf.extend_from_slice(length_buffer);
+		buf.extend_from_slice(&self.encode_buffer[..]);
 		Ok(())
 	}
 }
@@ -91,6 +91,7 @@ where
 				.map_err(|_| RkyvCodecError::CheckArchiveError)?;
 		let packet: Packet = archive.deserialize(&mut Infallible).unwrap();
 
+		// NOTE: This is the only place where I use bytes_old :( 
 		let amount_read = length + buf.len() - remaining.len();
 		buf.advance(amount_read);
 
