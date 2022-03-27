@@ -630,6 +630,7 @@ version = "0.2.0"
 dependencies = [
  "async-std",
  "bytecheck",
+ "bytes 0.5.6",
  "bytes 1.1.0",
  "futures",
  "futures_codec",
