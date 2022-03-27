@@ -91,7 +91,7 @@ where
 				.map_err(|_| RkyvCodecError::CheckArchiveError)?;
 		let packet: Packet = archive.deserialize(&mut Infallible).unwrap();
 
-		// NOTE: This is the only place where I use bytes_old :( 
+		// NOTE: This is the only place where I use bytes_old :(
 		let amount_read = length + buf.len() - remaining.len();
 		buf.advance(amount_read);
 

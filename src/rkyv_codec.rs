@@ -1,136 +1,219 @@
-#![cfg_attr(not(feature = "std"), no_std)]
-#![feature(associated_type_bounds)]
-#![feature(test)]
+use futures::{ready, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Sink};
+use std::{
+	borrow::BorrowMut,
+	ops::Range,
+	pin::Pin,
+	task::{Context, Poll},
+};
 
-//! Simple usage example:
-//! ```rust
-//! # use rkyv::{Infallible, Archived, AlignedVec, Archive, Serialize, Deserialize};
-//! # use rkyv_codec::{archive_stream, RkyvWriter, VarintLength};
-//! # use bytecheck::CheckBytes;
-//! # use futures::SinkExt;
-//! # async_std::task::block_on(async {
-//! #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
-//! #[archive_attr(derive(CheckBytes, Debug))] // Checkbytes is required
-//! struct Test {
-//!     int: u8,
-//!     string: String,
-//!     option: Option<Vec<i32>>,
-//! }
-//! let value = Test {
-//!     int: 42,
-//!     string: "hello world".to_string(),
-//!     option: Some(vec![1, 2, 3, 4]),
-//! };
-//!
-//! // Writing
-//! let writer = Vec::new();
-//! let mut codec = RkyvWriter::<_, VarintLength>::new(writer);
-//! codec.send(&value).await.unwrap();
-//!
-//! // Reading
-//! let mut reader = &codec.inner()[..];
-//! let mut buffer = AlignedVec::new(); // Aligned streaming buffer for re-use
-//! let data: &Archived<Test> = archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer).await.unwrap(); // This returns a reference into the passed buffer
-//! let value_received: Test = data.deserialize(&mut Infallible).unwrap();
-//!
-//! assert_eq!(value, value_received);
-//! # })
-//! ```
+use bytecheck::CheckBytes;
+use rkyv::{
+	ser::{
+		serializers::{
+			AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
+			SharedSerializeMap,
+		},
+		Serializer,
+	},
+	validation::validators::DefaultValidator,
+	AlignedVec, Archive, Archived, Serialize,
+};
 
-extern crate test;
+use crate::{length_codec::LengthCodec, RkyvCodecError};
 
-#[macro_use]
-extern crate thiserror;
-#[macro_use]
-extern crate pin_project;
-
-/// Abstract length encodings for reading and writing streams
-pub mod length_codec;
-pub use length_codec::VarintLength;
-
-#[cfg(feature = "futures_stream")]
-mod futures_stream;
-
-/// Error type for rkyv_codec
-#[cfg(feature = "std")]
-#[derive(Debug, Error)]
-pub enum RkyvCodecError {
-	#[error(transparent)]
-	IoError(#[from] futures::io::Error),
-	#[error("Packet not correctly archived")]
-	CheckArchiveError,
-
-	#[error("Failed to Serialize")]
-	SerializeError,
-	#[error("Failed to parse length")]
-	ReadLengthError,
-	#[error("Premature End of File Error")]
-	EOFError,
-
-	#[cfg(feature = "futures_stream")]
-	#[error("Deserialize Error")]
-	DeserializeError,
+/// Rewrites a single buffer representing an Archive to an `AsyncWrite`
+pub async fn archive_sink<'b, Inner: AsyncWrite + Unpin, L: LengthCodec>(
+	inner: &mut Inner,
+	archived: &[u8],
+) -> Result<(), RkyvCodecError> {
+	let length_buf = &mut L::Buffer::default();
+	let length_buf = L::encode(archived.len(), length_buf);
+	inner.write_all(length_buf).await?;
+	inner.write_all(archived).await?;
+	Ok(())
 }
-#[cfg(not(feature = "std"))]
-#[derive(Debug)]
-pub enum RkyvCodecError {
-	SerializeError,
-	ReadLengthError,
+/// Reads a single `&Archived<Object>` from an `AsyncRead` without checking for correct byte formatting
+/// # Safety
+/// This will cause undefined behavior if the bytestream is not the correct format (i.e. not generated through `archive_sink`, `RkyvWriter`, or `RkyvCodec`)
+pub async unsafe fn unsafe_archive_stream<
+	'b,
+	Inner: AsyncRead + Unpin,
+	Packet: Archive + 'b,
+	L: LengthCodec,
+>(
+	inner: &mut Inner,
+	buffer: &'b mut AlignedVec,
+) -> Result<&'b Archived<Packet>, RkyvCodecError> {
+	buffer.clear();
+
+	// Read Length
+	let mut length_buf = L::Buffer::default();
+	let length_buf = L::as_slice(&mut length_buf);
+	inner.read_exact(&mut *length_buf).await?;
+	let (archive_len, remaining) =
+		L::decode(length_buf).map_err(|_| RkyvCodecError::ReadLengthError)?;
+
+	// Reserve buffer
+	buffer.reserve(archive_len - buffer.len()); // Reserve at least the amount of bytes needed
+											// Safety: Already reserved the required space
+	unsafe {
+		buffer.set_len(archive_len);
+	}
+
+	buffer[0..remaining.len()].copy_from_slice(remaining); // Copy unread length_buf bytes to buffer
+
+	inner.read_exact(&mut buffer[remaining.len()..]).await?;
+	unsafe { Ok(rkyv::archived_root::<Packet>(buffer)) }
 }
 
-#[cfg(feature = "std")]
-mod rkyv_codec;
-#[cfg(feature = "std")]
-pub use rkyv_codec::*;
+/// Reads a single `&Archived<Object>` from an `AsyncRead` using the passed buffer.
+///
+/// Until streaming iterators (and streaming futures) are implemented in rust, this currently the fastest method I could come up with that requires no recurring heap allocations.
+///
+/// Requires rkyv validation feature & CheckBytes
+pub async fn archive_stream<'b, Inner: AsyncRead + Unpin, Packet, L: LengthCodec>(
+	inner: &mut Inner,
+	buffer: &'b mut AlignedVec,
+) -> Result<&'b Archived<Packet>, RkyvCodecError>
+where
+	Packet: rkyv::Archive<Archived: CheckBytes<DefaultValidator<'b>> + 'b>,
+{
+	buffer.clear();
 
-#[cfg(not(feature = "std"))]
-mod no_std_feature {
-	use bytecheck::CheckBytes;
-	use bytes::{Buf, BufMut, Bytes, BytesMut};
-	use rkyv::{validation::validators::DefaultValidator, AlignedVec, Archive, Archived};
+	// Read length
+	let mut length_buf = L::Buffer::default();
+	let length_buf = L::as_slice(&mut length_buf);
+	inner.read_exact(length_buf).await?;
+	let (archive_len, remaining) =
+		L::decode(length_buf).map_err(|_| RkyvCodecError::ReadLengthError)?;
 
-	use crate::{length_codec::LengthCodec, RkyvCodecError};
+	// Reserve buffer
+	buffer.reserve(archive_len - buffer.len()); // Reserve at least the amount of bytes needed for packet
+											// Safety: Already reserved the required space
+	unsafe {
+		buffer.set_len(archive_len);
+	}
 
-	/// Writes a single `Object` from a `bytes::Bytes`
-	pub fn archive_sink_bytes<Packet: Archive, L: LengthCodec>(
-		bytes: &mut BytesMut,
-		archived: &[u8],
-	) -> Result<(), RkyvCodecError> {
-		let length_buf = &mut L::Buffer::default();
-		let length_buf = L::encode(archived.len(), length_buf);
-		bytes.put(length_buf);
-		bytes.put(archived);
+	// Read into aligned buffer
+	buffer[0..remaining.len()].copy_from_slice(remaining); // Copy unread length_buf bytes to buffer
+	inner.read_exact(&mut buffer[remaining.len()..]).await?; // Read into buffer after the appended bytes
+
+	let archive = rkyv::check_archived_root::<'b, Packet>(buffer)
+		.map_err(|_| RkyvCodecError::CheckArchiveError)?;
+	Ok(archive)
+}
+
+/// Wraps an `AsyncWrite` and implements `Sink` to serialize `Archive` objects.
+#[pin_project]
+pub struct RkyvWriter<Writer: AsyncWrite, L: LengthCodec> {
+	#[pin]
+	writer: Writer,
+	buffer: AlignedVec,
+	length_buffer: L::Buffer,
+	len_state: Range<usize>, // How much of the length buffer has been written
+	buf_state: usize, // Whether or not the aligned buf is being written and if so, how much so far
+	scratch: Option<FallbackScratch<HeapScratch<256>, AllocScratch>>,
+	shared: Option<SharedSerializeMap>,
+}
+impl<Writer: AsyncWrite, L: LengthCodec> RkyvWriter<Writer, L> {
+	pub fn new(writer: Writer) -> Self {
+		Self {
+			writer,
+			buffer: AlignedVec::new(),
+			length_buffer: L::Buffer::default(),
+			len_state: Default::default(),
+			buf_state: 0,
+			scratch: Some(FallbackScratch::new(
+				HeapScratch::new(),
+				AllocScratch::default(),
+			)),
+			shared: Some(SharedSerializeMap::new()),
+		}
+	}
+	pub fn inner(self) -> Writer {
+		self.writer
+	}
+}
+
+impl<Writer: AsyncWrite, Packet, L: LengthCodec> Sink<&Packet> for RkyvWriter<Writer, L>
+where
+	Packet: Archive
+		+ for<'b> Serialize<
+			CompositeSerializer<
+				AlignedSerializer<&'b mut AlignedVec>,
+				FallbackScratch<HeapScratch<256>, AllocScratch>,
+				SharedSerializeMap,
+			>,
+		>,
+{
+	type Error = RkyvCodecError;
+
+	fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		self.project()
+			.writer
+			.poll_flush(cx)
+			.map_err(RkyvCodecError::IoError)
+	}
+
+	fn start_send(self: Pin<&mut Self>, item: &Packet) -> Result<(), Self::Error> {
+		let this = self.project();
+		this.buffer.clear();
+
+		// Construct Serializer
+		let mut serializer = CompositeSerializer::new(
+			AlignedSerializer::new(this.buffer.borrow_mut()),
+			this.scratch.take().unwrap(),
+			this.shared.take().unwrap(),
+		);
+
+		serializer
+			.serialize_value(item)
+			.map_err(|_| RkyvCodecError::SerializeError)?;
+
+		// Deconstruct composite serializer
+		let (_, scratch, shared) = serializer.into_components();
+		*this.scratch = Some(scratch);
+		*this.shared = Some(shared);
+
+		*this.len_state = 0..L::encode(this.buffer.len(), this.length_buffer).len();
+		*this.buf_state = 0;
 		Ok(())
 	}
-	/// Reads a single `&Archived<Object>` from a `bytes::Bytes` into the passed buffer
-	pub unsafe fn archive_stream_bytes_unsafe<'b, Packet: Archive, L: LengthCodec>(
-		bytes: &mut Bytes,
-		buffer: &'b mut AlignedVec,
-	) -> Result<&'b Archived<Packet>, RkyvCodecError> {
-		// Read length
-		let mut length_buf = L::Buffer::default();
-		let length_buf_len = L::as_slice(&mut length_buf).len();
 
-		if bytes.len() < length_buf_len {
-			return Err(RkyvCodecError::ReadLengthError);
+	fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		let mut this = self.project();
+
+		let len_state = this.len_state;
+		if len_state.start <= len_state.end {
+			let length_buffer = L::as_slice(this.length_buffer);
+			let length_buffer = &mut length_buffer[len_state.clone()];
+
+			let written = ready!(Pin::new(&mut this.writer).poll_write(cx, length_buffer)?);
+			len_state.start += written;
 		}
 
-		let (archive_len, remaining) =
-			L::decode(&bytes).map_err(|_| RkyvCodecError::ReadLengthError)?;
+		while *this.buf_state < this.buffer.len() {
+			let buffer_left = &this.buffer[*this.buf_state..this.buffer.len()];
+			let bytes_written = ready!(Pin::new(&mut this.writer).poll_write(cx, buffer_left))?;
+			if bytes_written == 0 {
+				return Poll::Ready(Err(RkyvCodecError::EOFError));
+			}
+			*this.buf_state += bytes_written;
+		}
 
-		// Read into aligned buffer
-		buffer.extend_from_slice(&remaining[0..archive_len]);
-		bytes.advance(archive_len);
+		ready!(this.writer.poll_flush(cx)?);
+		Poll::Ready(Ok(()))
+	}
 
-		let archive = rkyv::archived_root::<Packet>(buffer);
-		Ok(archive)
+	fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		self.project()
+			.writer
+			.poll_close(cx)
+			.map_err(RkyvCodecError::IoError)
 	}
 }
-#[cfg(not(feature = "std"))]
-pub use no_std_feature::*;
 
 #[cfg(test)]
-#[cfg(feature = "std")]
 mod tests {
 	use async_std::task::block_on;
 	use bytecheck::CheckBytes;

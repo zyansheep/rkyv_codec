@@ -54,7 +54,7 @@ impl LengthCodec for U32Length {
 
 	#[inline]
 	fn decode(buf: &[u8]) -> Result<(usize, &[u8]), Self::Error> {
-		let bytes: [u8; 4] = buf.try_into().map_err(|_|NotEnoughBytesError)?;
+		let bytes: [u8; 4] = buf.try_into().map_err(|_| NotEnoughBytesError)?;
 		Ok((u32::from_be_bytes(bytes) as usize, &buf[4..]))
 	}
 }
@@ -77,7 +77,7 @@ impl LengthCodec for U64Length {
 
 	#[inline]
 	fn decode(buf: &[u8]) -> Result<(usize, &[u8]), Self::Error> {
-		let bytes: [u8; 8] = buf.try_into().map_err(|_|NotEnoughBytesError)?;
+		let bytes: [u8; 8] = buf.try_into().map_err(|_| NotEnoughBytesError)?;
 		Ok((u64::from_be_bytes(bytes) as usize, &buf[8..]))
 	}
 }
