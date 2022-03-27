@@ -12,9 +12,10 @@ Simple async codec for [rkyv](https://github.com/rkyv/rkyv). Reuses streaming bu
 
 This crate provides a makeshift adaptor for streaming `&Archived<Object>`s from an `AsyncRead` using a reusable external buffer, as well as a `futures::Sink` implementation to serialize `Object`s to an `AsyncWrite`.
 It uses multiformat's [unsigned_varint](https://docs.rs/unsigned-varint/latest/unsigned_varint/) for variable-length length encoding by default, but allows for other kinds of length encoding through the `LengthEncoding` trait.
+It also supports directly using `bytes::BytesMut` and `#[no_std]` when default features are disabled.
 
 ## Examples
-This crate has two examples: chat_client & chat_server. Run both of them at the same time to see a proof-of-concept Archive tcp stream in action.
+This crate has three examples: chat_client, chat_server & no-std. Run the first two at the same time to see a proof-of-concept Archive tcp echo server in action.
 
 To run:
 
@@ -47,6 +48,8 @@ let data: &Archived<Test> = archive_stream::<_, Test, VarintLength>(&mut reader,
 let value_received: Test = data.deserialize(&mut Infallible).unwrap();
 assert_eq!(value, value_received);
 ```
+
+See [`examples/no-std`](examples/no-std/src/main.rs) for an example with no-std support.
 
 ## Benchmarks
 
