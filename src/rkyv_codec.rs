@@ -6,6 +6,8 @@ use std::{
 	task::{Context, Poll},
 };
 
+use pin_project::pin_project;
+
 use bytecheck::CheckBytes;
 use rkyv::{
 	ser::{

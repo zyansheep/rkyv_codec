@@ -39,11 +39,6 @@
 
 extern crate test;
 
-#[macro_use]
-extern crate thiserror;
-#[macro_use]
-extern crate pin_project;
-
 /// Abstract length encodings for reading and writing streams
 pub mod length_codec;
 pub use length_codec::VarintLength;
@@ -52,6 +47,8 @@ pub use length_codec::VarintLength;
 mod futures_stream;
 
 /// Error type for rkyv_codec
+#[cfg(feature = "std")]
+use thiserror::Error;
 #[cfg(feature = "std")]
 #[derive(Debug, Error)]
 pub enum RkyvCodecError {
@@ -85,9 +82,8 @@ pub use rkyv_codec::*;
 
 #[cfg(not(feature = "std"))]
 mod no_std_feature {
-	use bytecheck::CheckBytes;
 	use bytes::{Buf, BufMut, Bytes, BytesMut};
-	use rkyv::{validation::validators::DefaultValidator, AlignedVec, Archive, Archived};
+	use rkyv::{AlignedVec, Archive, Archived};
 
 	use crate::{length_codec::LengthCodec, RkyvCodecError};
 
