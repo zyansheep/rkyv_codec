@@ -71,6 +71,7 @@ pub enum RkyvCodecError {
 #[cfg(not(feature = "std"))]
 #[derive(Debug)]
 pub enum RkyvCodecError {
+    CheckArchiveError,
 	SerializeError,
 	ReadLengthError,
 }
@@ -80,7 +81,6 @@ mod rkyv_codec;
 #[cfg(feature = "std")]
 pub use rkyv_codec::*;
 
-#[cfg(not(feature = "std"))]
 mod no_std_feature {
 	use bytes::{Buf, BufMut, Bytes, BytesMut};
 	use rkyv::{AlignedVec, Archive, Archived};
@@ -121,8 +121,34 @@ mod no_std_feature {
 		let archive = rkyv::archived_root::<Packet>(buffer);
 		Ok(archive)
 	}
+    /// Reads a single `&Archived<Object>` from a `bytes::Bytes` into the passed buffer if
+    /// validation enabled.
+    pub fn archive_stream_bytes<'b, Packet, L: LengthCodec>(
+        bytes: &mut Bytes,
+        buffer: &'b mut AlignedVec,
+    ) -> Result<&'b Archived<Packet>, RkyvCodecError>
+        where Packet: rkyv::Archive<Archived: bytecheck::CheckBytes<rkyv::validation::validators::DefaultValidator<'b>> + 'b>,
+    {
+		// Read length
+		let mut length_buf = L::Buffer::default();
+		let length_buf_len = L::as_slice(&mut length_buf).len();
+
+		if bytes.len() < length_buf_len {
+			return Err(RkyvCodecError::ReadLengthError);
+		}
+
+		let (archive_len, remaining) =
+			L::decode(&bytes).map_err(|_| RkyvCodecError::ReadLengthError)?;
+
+		// Read into aligned buffer
+		buffer.extend_from_slice(&remaining[0..archive_len]);
+		bytes.advance(archive_len);
+
+		let archive = rkyv::check_archived_root::<'b, Packet>(buffer)
+            .map_err(|_| RkyvCodecError::CheckArchiveError)?;
+		Ok(archive)
+    }
 }
-#[cfg(not(feature = "std"))]
 pub use no_std_feature::*;
 
 #[cfg(test)]
