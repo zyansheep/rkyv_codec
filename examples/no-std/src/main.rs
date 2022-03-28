@@ -35,10 +35,12 @@ fn main() {
 	let mut buffer = buffer.freeze();
 
 	let mut stream_buffer = AlignedVec::new();
-	let result = unsafe { rkyv_codec::archive_stream_bytes_unsafe::<Test, VarintLength>(
-		&mut buffer,
-		&mut stream_buffer,
-	) }
+	let result = unsafe {
+		rkyv_codec::archive_stream_bytes_unsafe::<Test, VarintLength>(
+			&mut buffer,
+			&mut stream_buffer,
+		)
+	}
 	.unwrap();
 
 	assert_eq!(&value, result);

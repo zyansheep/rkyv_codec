@@ -71,7 +71,7 @@ pub enum RkyvCodecError {
 #[cfg(not(feature = "std"))]
 #[derive(Debug)]
 pub enum RkyvCodecError {
-    CheckArchiveError,
+	CheckArchiveError,
 	SerializeError,
 	ReadLengthError,
 }
@@ -79,7 +79,7 @@ pub enum RkyvCodecError {
 #[cfg(feature = "std")]
 mod rkyv_codec;
 #[cfg(feature = "std")]
-pub use rkyv_codec::*;
+pub use crate::rkyv_codec::*;
 
 mod no_std_feature {
 	use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -99,6 +99,8 @@ mod no_std_feature {
 		Ok(())
 	}
 	/// Reads a single `&Archived<Object>` from a `bytes::Bytes` into the passed buffer
+	/// # Safety
+	/// This will cause undefined behavior if the bytestream is not the correct format (i.e. not generated through `archive_sink[_bytes]`, `RkyvWriter`, or `RkyvCodec`) with the correct LengthCodec
 	pub unsafe fn archive_stream_bytes_unsafe<'b, Packet: Archive, L: LengthCodec>(
 		bytes: &mut Bytes,
 		buffer: &'b mut AlignedVec,
@@ -112,7 +114,7 @@ mod no_std_feature {
 		}
 
 		let (archive_len, remaining) =
-			L::decode(&bytes).map_err(|_| RkyvCodecError::ReadLengthError)?;
+			L::decode(bytes).map_err(|_| RkyvCodecError::ReadLengthError)?;
 
 		// Read into aligned buffer
 		buffer.extend_from_slice(&remaining[0..archive_len]);
@@ -121,14 +123,18 @@ mod no_std_feature {
 		let archive = rkyv::archived_root::<Packet>(buffer);
 		Ok(archive)
 	}
-    /// Reads a single `&Archived<Object>` from a `bytes::Bytes` into the passed buffer if
-    /// validation enabled.
-    pub fn archive_stream_bytes<'b, Packet, L: LengthCodec>(
-        bytes: &mut Bytes,
-        buffer: &'b mut AlignedVec,
-    ) -> Result<&'b Archived<Packet>, RkyvCodecError>
-        where Packet: rkyv::Archive<Archived: bytecheck::CheckBytes<rkyv::validation::validators::DefaultValidator<'b>> + 'b>,
-    {
+	/// Reads a single `&Archived<Object>` from a `bytes::Bytes` into the passed buffer if
+	/// validation enabled.
+	pub fn archive_stream_bytes<'b, Packet, L: LengthCodec>(
+		bytes: &mut Bytes,
+		buffer: &'b mut AlignedVec,
+	) -> Result<&'b Archived<Packet>, RkyvCodecError>
+	where
+		Packet: rkyv::Archive<
+			Archived: bytecheck::CheckBytes<rkyv::validation::validators::DefaultValidator<'b>>
+			              + 'b,
+		>,
+	{
 		// Read length
 		let mut length_buf = L::Buffer::default();
 		let length_buf_len = L::as_slice(&mut length_buf).len();
@@ -138,16 +144,16 @@ mod no_std_feature {
 		}
 
 		let (archive_len, remaining) =
-			L::decode(&bytes).map_err(|_| RkyvCodecError::ReadLengthError)?;
+			L::decode(bytes).map_err(|_| RkyvCodecError::ReadLengthError)?;
 
 		// Read into aligned buffer
 		buffer.extend_from_slice(&remaining[0..archive_len]);
 		bytes.advance(archive_len);
 
 		let archive = rkyv::check_archived_root::<'b, Packet>(buffer)
-            .map_err(|_| RkyvCodecError::CheckArchiveError)?;
+			.map_err(|_| RkyvCodecError::CheckArchiveError)?;
 		Ok(archive)
-    }
+	}
 }
 pub use no_std_feature::*;
 
@@ -156,12 +162,13 @@ pub use no_std_feature::*;
 mod tests {
 	use async_std::task::block_on;
 	use bytecheck::CheckBytes;
+	use bytes::BytesMut;
 	use futures::{io::Cursor, AsyncRead, AsyncWrite, SinkExt, StreamExt, TryStreamExt};
 	use futures_codec::{CborCodec, Framed};
 	use rkyv::{to_bytes, AlignedVec, Archive, Archived, Deserialize, Infallible, Serialize};
 
 	use crate::{
-		archive_sink, archive_stream,
+		archive_sink, archive_sink_bytes, archive_stream, archive_stream_bytes,
 		futures_stream::RkyvCodec,
 		length_codec::{LengthCodec, U64Length, VarintLength},
 		RkyvWriter,
@@ -214,6 +221,23 @@ mod tests {
 				.await
 				.unwrap();
 			assert_eq!(*TEST, *value);
+		}
+	}
+	#[test]
+	fn bytes_functions() {
+		let mut writer = BytesMut::new();
+		for _ in 0..50 {
+			archive_sink_bytes::<Test, VarintLength>(&mut writer, *TEST_BYTES).unwrap();
+		}
+
+		let mut reader = writer.freeze();
+
+		let mut buffer = AlignedVec::with_capacity(256);
+
+		for _ in 0..50 {
+			let data: &Archived<Test> =
+				archive_stream_bytes::<Test, VarintLength>(&mut reader, &mut buffer).unwrap();
+			assert_eq!(*TEST, *data);
 		}
 	}
 
