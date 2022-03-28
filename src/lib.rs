@@ -107,18 +107,19 @@ mod no_std_feature {
 	) -> Result<&'b Archived<Packet>, RkyvCodecError> {
 		// Read length
 		let mut length_buf = L::Buffer::default();
-		let length_buf_len = L::as_slice(&mut length_buf).len();
+		let length_buf_slice = L::as_slice(&mut length_buf);
+		let copy_len = usize::min(length_buf_slice.len(), bytes.len());
+		length_buf_slice[..copy_len].copy_from_slice(&bytes[..copy_len]);
 
-		if bytes.len() < length_buf_len {
-			return Err(RkyvCodecError::ReadLengthError);
-		}
-
+		// Decode length
 		let (archive_len, remaining) =
-			L::decode(bytes).map_err(|_| RkyvCodecError::ReadLengthError)?;
+			L::decode(&length_buf_slice).map_err(|_| RkyvCodecError::ReadLengthError)?;
 
 		// Read into aligned buffer
-		buffer.extend_from_slice(&remaining[0..archive_len]);
-		bytes.advance(archive_len);
+		let begin = length_buf_slice.len() - remaining.len();
+		let end = begin + archive_len;
+		buffer.extend_from_slice(&bytes[begin..end]);
+		bytes.advance(end);
 
 		let archive = rkyv::archived_root::<Packet>(buffer);
 		Ok(archive)
@@ -137,18 +138,19 @@ mod no_std_feature {
 	{
 		// Read length
 		let mut length_buf = L::Buffer::default();
-		let length_buf_len = L::as_slice(&mut length_buf).len();
+		let length_buf_slice = L::as_slice(&mut length_buf);
+		let copy_len = usize::min(length_buf_slice.len(), bytes.len());
+		length_buf_slice[..copy_len].copy_from_slice(&bytes[..copy_len]);
 
-		if bytes.len() < length_buf_len {
-			return Err(RkyvCodecError::ReadLengthError);
-		}
-
+		// Decode length
 		let (archive_len, remaining) =
-			L::decode(bytes).map_err(|_| RkyvCodecError::ReadLengthError)?;
+			L::decode(&length_buf_slice).map_err(|_| RkyvCodecError::ReadLengthError)?;
 
 		// Read into aligned buffer
-		buffer.extend_from_slice(&remaining[0..archive_len]);
-		bytes.advance(archive_len);
+		let begin = length_buf_slice.len() - remaining.len();
+		let end = begin + archive_len;
+		buffer.extend_from_slice(&bytes[begin..end]);
+		bytes.advance(end);
 
 		let archive = rkyv::check_archived_root::<'b, Packet>(buffer)
 			.map_err(|_| RkyvCodecError::CheckArchiveError)?;
