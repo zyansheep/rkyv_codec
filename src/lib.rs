@@ -113,7 +113,7 @@ mod no_std_feature {
 
 		// Decode length
 		let (archive_len, remaining) =
-			L::decode(&length_buf_slice).map_err(|_| RkyvCodecError::ReadLengthError)?;
+			L::decode(length_buf_slice).map_err(|_| RkyvCodecError::ReadLengthError)?;
 
 		// Read into aligned buffer
 		let begin = length_buf_slice.len() - remaining.len();
@@ -144,7 +144,7 @@ mod no_std_feature {
 
 		// Decode length
 		let (archive_len, remaining) =
-			L::decode(&length_buf_slice).map_err(|_| RkyvCodecError::ReadLengthError)?;
+			L::decode(length_buf_slice).map_err(|_| RkyvCodecError::ReadLengthError)?;
 
 		// Read into aligned buffer
 		let begin = length_buf_slice.len() - remaining.len();
