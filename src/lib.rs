@@ -37,8 +37,6 @@
 //! # })
 //! ```
 
-extern crate test;
-
 /// Abstract length encodings for reading and writing streams
 pub mod length_codec;
 pub use length_codec::VarintLength;
@@ -162,6 +160,8 @@ pub use no_std_feature::*;
 #[cfg(test)]
 #[cfg(feature = "std")]
 mod tests {
+	extern crate test;
+
 	use async_std::task::block_on;
 	use bytecheck::CheckBytes;
 	use bytes::BytesMut;

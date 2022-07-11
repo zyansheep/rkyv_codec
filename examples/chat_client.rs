@@ -1,10 +1,10 @@
 use std::{fmt, io::Write};
 
-use futures::{SinkExt, FutureExt};
 use async_std::{io, net::TcpStream};
+use futures::{FutureExt, SinkExt};
 
-use rkyv::{AlignedVec, Archive, Deserialize, Infallible, Serialize};
 use bytecheck::CheckBytes;
+use rkyv::{AlignedVec, Archive, Deserialize, Infallible, Serialize};
 
 use rkyv_codec::{archive_stream, RkyvWriter, VarintLength};
 
@@ -21,7 +21,12 @@ struct ChatMessage {
 }
 impl fmt::Display for ChatMessage {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		write!(f, "<{}>: {}", self.sender.as_deref().unwrap_or("Anonymous"), self.message)
+		write!(
+			f,
+			"<{}>: {}",
+			self.sender.as_deref().unwrap_or("Anonymous"),
+			self.message
+		)
 	}
 }
 
@@ -38,7 +43,7 @@ async fn main() -> io::Result<()> {
 	let mut buffer = AlignedVec::new();
 
 	let (mut rl, mut writer) = Readline::new("> ".to_owned()).unwrap();
-	
+
 	loop {
 		futures::select! {
 			archive = archive_stream::<_, ChatMessage, VarintLength>(&mut tcp_stream, &mut buffer).fuse() => match archive {

@@ -2,11 +2,17 @@
 
 use std::{net::SocketAddr, sync::Arc};
 
+use async_std::{
+	channel::{bounded, Receiver, Sender, TrySendError},
+	io,
+	net::{TcpListener, TcpStream},
+	sync::Mutex,
+	task,
+};
 use futures::{prelude::*, SinkExt, StreamExt};
-use async_std::{channel::{Receiver, Sender, TrySendError, bounded}, io, net::{TcpListener, TcpStream}, sync::Mutex, task};
 
-use rkyv::{AlignedVec, Archive, Deserialize, Serialize, Infallible};
 use bytecheck::CheckBytes;
+use rkyv::{AlignedVec, Archive, Deserialize, Infallible, Serialize};
 
 use anyhow::Context;
 
@@ -22,13 +28,18 @@ struct ChatMessage {
 	message: String,
 }
 
-async fn process(stream: TcpStream, outgoing: Sender<ChatMessage>, mut incoming: Receiver<ChatMessage>, addr: &SocketAddr) -> anyhow::Result<()> {
+async fn process(
+	stream: TcpStream,
+	outgoing: Sender<ChatMessage>,
+	mut incoming: Receiver<ChatMessage>,
+	addr: &SocketAddr,
+) -> anyhow::Result<()> {
 	println!("[{addr}] Joined Server");
 
 	let mut reader = stream.clone();
 
 	let mut writer = RkyvWriter::<_, VarintLength>::new(stream);
-	
+
 	let mut buffer = AlignedVec::new();
 
 	loop {
@@ -47,7 +58,7 @@ async fn process(stream: TcpStream, outgoing: Sender<ChatMessage>, mut incoming:
 			}
 		}
 	}
-	
+
 	Ok(())
 }
 
@@ -66,7 +77,11 @@ async fn main() -> io::Result<()> {
 	task::spawn(async move {
 		while let Ok(msg) = message_receiver.recv().await {
 			outgoing_send_list.lock().await.retain(|sender| {
-				if let Err(TrySendError::Closed(_)) = sender.try_send(msg.clone()) { false } else { true }
+				if let Err(TrySendError::Closed(_)) = sender.try_send(msg.clone()) {
+					false
+				} else {
+					true
+				}
 			})
 		}
 	});
@@ -74,12 +89,15 @@ async fn main() -> io::Result<()> {
 	while let Some(stream) = incoming.next().await {
 		let stream = match stream {
 			Ok(stream) => stream,
-			Err(err) => { println!("error: {err}"); continue }
+			Err(err) => {
+				println!("error: {err}");
+				continue;
+			}
 		};
 		let outgoing = broadcast_sender.clone();
-		
+
 		let (sender, incoming) = bounded(20);
-		
+
 		sender_list.lock().await.push(sender);
 		task::spawn(async move {
 			let addr = stream.peer_addr().unwrap();
