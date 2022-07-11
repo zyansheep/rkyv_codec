@@ -9,20 +9,23 @@ repository = "https://github.com/zyansheep/rkyv_codec"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rkyv = { version = "0.7.33", features = ["validation"] }
-bytecheck = "0.6.7"
-futures = "0.3.21"
-pin-project = "1.0.10"
-unsigned-varint = { version = "0.7.1", features = ["futures"] }
-futures_codec = { version = "0.4.1", features = ["cbor"], optional = true }
-bytes = { version = "1.1.0" }
-bytes-old = { package = "bytes", version = "0.5.0", optional = true }
-thiserror = "1.0.30"
+rkyv = { version = "0.7", features = ["validation"] }
+bytecheck = "0.6"
+futures = "0.3"
+pin-project = "1.0"
+unsigned-varint = { version = "0.7", features = ["futures"] }
+futures_codec = { version = "0.4", features = ["cbor"], optional = true }
+bytes = { version = "1.1" }
+bytes-old = { package = "bytes", version = "0.5", optional = true }
+thiserror = "1.0"
 
 [dev-dependencies]
-async-std = { version = "1.10", features = ["attributes"] }
+async-std = { version = "1.12.0", features = ["attributes"] }
 serde = "1.0.136"
 lazy_static = "1.4.0"
+# Examples
+rustyline-async = "0.2.5"
+anyhow = "1.0.58"
 
 [features]
 default = ["futures_stream", "std"]
