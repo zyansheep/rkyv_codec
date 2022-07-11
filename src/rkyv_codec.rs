@@ -37,7 +37,7 @@ pub async fn archive_sink<'b, Inner: AsyncWrite + Unpin, L: LengthCodec>(
 /// Reads a single `&Archived<Object>` from an `AsyncRead` without checking for correct byte formatting
 /// # Safety
 /// This will cause undefined behavior if the bytestream is not the correct format (i.e. not generated through `archive_sink[_bytes]`, `RkyvWriter`, or `RkyvCodec`) with the correct LengthCodec
-pub async unsafe fn unsafe_archive_stream<
+pub async unsafe fn archive_stream_unsafe<
 	'b,
 	Inner: AsyncRead + Unpin,
 	Packet: Archive + 'b,
