@@ -37,10 +37,3 @@ members = ["examples/no-std"]
 
 [package.metadata.nix]
 build = true
-nativeBuildInputs = [
-	"cargo-edit",
-]
-buildInputs = []
-runtimeLibs = []
-toolchain = "nightly"
-devshell = {name = "rust-shell" }
