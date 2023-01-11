@@ -71,10 +71,12 @@ async fn main() -> io::Result<()> {
 					writeln!(writer, "CTRL-D")?;
 					break
 				},
-				Err(err) => write!(writer, "error reading input: {err}")?,
+				Err(err) => { write!(writer, "error reading input: {err}")?; break },
 			}
 		}
 	}
+
+	let _ = rl.flush();
 
 	Ok(())
 }

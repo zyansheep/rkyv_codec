@@ -53,7 +53,7 @@ See [`examples/no-std`](examples/no-std/src/main.rs) for an example with no-std 
 
 ## Benchmarks
 
-These are a set of benchmarks, each benchmark represents 50 test objects being either sent or received.
+These are a set of benchmarks, each benchmark represents 50 test objects being either sent or received. (requires nightly)
 ```
 test tests::bench_archive_sink_50              ... bench:      10,388 ns/iter (+/- 1,603)
 test tests::bench_archive_sink_prearchived_50  ... bench:       2,032 ns/iter (+/- 302)
