@@ -71,7 +71,7 @@ impl<Packet, L: LengthCodec> Decoder for RkyvCodec<Packet, L>
 where
 	Packet: Archive + 'static,
 	Packet::Archived: for<'b> CheckBytes<rkyv::validation::validators::DefaultValidator<'b>>
-	+ Deserialize<Packet, Infallible>
+		+ Deserialize<Packet, Infallible>,
 {
 	type Item = Packet;
 	type Error = RkyvCodecError;

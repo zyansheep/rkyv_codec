@@ -129,7 +129,8 @@ mod no_std_feature {
 	) -> Result<&'b Archived<Packet>, RkyvCodecError>
 	where
 		Packet: rkyv::Archive,
-		Packet::Archived: bytecheck::CheckBytes<rkyv::validation::validators::DefaultValidator<'b>> + 'b
+		Packet::Archived:
+			bytecheck::CheckBytes<rkyv::validation::validators::DefaultValidator<'b>> + 'b,
 	{
 		// Read length
 		let mut length_buf = L::Buffer::default();

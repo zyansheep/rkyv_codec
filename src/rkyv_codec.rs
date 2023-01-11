@@ -219,7 +219,7 @@ where
 #[cfg(test)]
 mod tests {
 	extern crate test;
-	
+
 	use async_std::task::block_on;
 	use bytecheck::CheckBytes;
 	use futures::{io::Cursor, AsyncRead, AsyncWrite, SinkExt, StreamExt, TryStreamExt};
