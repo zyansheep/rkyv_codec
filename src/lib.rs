@@ -1,6 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-#![feature(associated_type_bounds)]
-#![feature(test)]
+#![cfg_attr(test, feature(test))]
 
 //! Simple usage example:
 //! ```rust
@@ -129,10 +128,8 @@ mod no_std_feature {
 		buffer: &'b mut AlignedVec,
 	) -> Result<&'b Archived<Packet>, RkyvCodecError>
 	where
-		Packet: rkyv::Archive<
-			Archived: bytecheck::CheckBytes<rkyv::validation::validators::DefaultValidator<'b>>
-			              + 'b,
-		>,
+		Packet: rkyv::Archive,
+		Packet::Archived: bytecheck::CheckBytes<rkyv::validation::validators::DefaultValidator<'b>> + 'b
 	{
 		// Read length
 		let mut length_buf = L::Buffer::default();

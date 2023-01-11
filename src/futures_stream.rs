@@ -69,11 +69,9 @@ where
 /// Decoder impl parses json objects from bytes
 impl<Packet, L: LengthCodec> Decoder for RkyvCodec<Packet, L>
 where
-	Packet: for<'b> Archive<
-			Archived: CheckBytes<rkyv::validation::validators::DefaultValidator<'b>>
-			              + Deserialize<Packet, Infallible>
-			              + 'b,
-		> + 'static,
+	Packet: Archive + 'static,
+	Packet::Archived: for<'b> CheckBytes<rkyv::validation::validators::DefaultValidator<'b>>
+	+ Deserialize<Packet, Infallible>
 {
 	type Item = Packet;
 	type Error = RkyvCodecError;

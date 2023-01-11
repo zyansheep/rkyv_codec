@@ -78,7 +78,8 @@ pub async fn archive_stream<'b, Inner: AsyncRead + Unpin, Packet, L: LengthCodec
 	buffer: &'b mut AlignedVec,
 ) -> Result<&'b Archived<Packet>, RkyvCodecError>
 where
-	Packet: rkyv::Archive<Archived: CheckBytes<DefaultValidator<'b>> + 'b>,
+	Packet: rkyv::Archive,
+	Packet::Archived: CheckBytes<DefaultValidator<'b>> + 'b,
 {
 	buffer.clear();
 

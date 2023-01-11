@@ -1,5 +1,3 @@
-#![feature(drain_filter)]
-
 use std::{net::SocketAddr, sync::Arc};
 
 use async_std::{
@@ -35,6 +33,7 @@ async fn process(
 	addr: &SocketAddr,
 ) -> anyhow::Result<()> {
 	println!("[{addr}] Joined Server");
+	outgoing.send(ChatMessage { sender: Some("Sever".to_owned()), message: format!("{} Joined the Chat!", addr) }).await?;
 
 	let mut reader = stream.clone();
 
