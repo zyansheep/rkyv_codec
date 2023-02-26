@@ -37,3 +37,4 @@ members = ["examples/no-std"]
 
 [package.metadata.nix]
 build = true
+app = true
