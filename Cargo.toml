@@ -35,6 +35,9 @@ futures_stream = ["futures_codec", "bytes-old"]
 [workspace]
 members = ["examples/no-std"]
 
+[workspace.metadata.nix]
+systems = [ "x86_64-linux" ]
+
 [package.metadata.nix]
-build = true
 app = true
+build = true

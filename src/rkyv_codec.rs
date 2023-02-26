@@ -118,6 +118,10 @@ pub struct RkyvWriter<Writer: AsyncWrite, L: LengthCodec> {
 	scratch: Option<FallbackScratch<HeapScratch<256>, AllocScratch>>,
 	shared: Option<SharedSerializeMap>,
 }
+
+// Safety: This should be safe because while HeapScratch is not Send (because it contains BufferScratch which contains NonNull), that NonNull is not used in a way that violates Send.
+unsafe impl<Writer: AsyncWrite, L: LengthCodec> Send for RkyvWriter<Writer, L> {}
+
 impl<Writer: AsyncWrite, L: LengthCodec> RkyvWriter<Writer, L> {
 	pub fn new(writer: Writer) -> Self {
 		Self {
