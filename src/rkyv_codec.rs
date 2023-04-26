@@ -60,12 +60,9 @@ pub async unsafe fn archive_stream_unsafe<
 	let (archive_len, unused) =
 		L::decode(length_buf).map_err(|_| RkyvCodecError::ReadLengthError)?;
 
-	// Reserve enough bytes in buffer to contain
-	buffer.reserve(archive_len - buffer.len()); // Reserve at least the amount of bytes needed
-
 	// If not enough capacity in buffer to fit `archive_len`, reserve more.
 	if buffer.capacity() < archive_len {
-		buffer.reserve(buffer.capacity() - archive_len)
+		buffer.reserve(buffer.len() - archive_len)
 	}
 	// Write any potentially unused bytes from length_buf to buffer
 	buffer.extend_from_slice(unused);
