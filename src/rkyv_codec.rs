@@ -62,13 +62,15 @@ pub async unsafe fn archive_stream_unsafe<
 
 	// If not enough capacity in buffer to fit `archive_len`, reserve more.
 	if buffer.capacity() < archive_len {
-		buffer.reserve(buffer.len() - archive_len)
+		buffer.reserve(archive_len - buffer.len())
 	}
 	// Write any potentially unused bytes from length_buf to buffer
 	buffer.extend_from_slice(unused);
 
 	// Safety: Caller should make sure that reader does not read from this potentially uninitialized buffer passed to poll_read()
 	unsafe { buffer.set_len(archive_len) }
+
+	println!("buffer_len: {:?}, unused: {:?}", buffer.len(), unused);
 
 	// Read into buffer, after any unused length bytes
 	inner.read_exact(&mut buffer[unused.len()..]).await?;
@@ -93,14 +95,32 @@ pub async fn archive_stream<'b, Inner: AsyncRead + Unpin, Packet, L: LengthCodec
 	buffer: &'b mut AlignedVec,
 ) -> Result<&'b Archived<Packet>, RkyvCodecError>
 where
-	Packet: rkyv::Archive,
+	Packet: rkyv::Archive + 'b,
 	Packet::Archived: rkyv::CheckBytes<DefaultValidator<'b>>,
 {
-	// Safety: This should not trigger undefined behavior as even if the packet in question is an invalid archive, the archive is not actually read from.
-	// Safety: Even though this is not an unsafe function, it may under some circumstances produce undefined behavior if the AsyncRead implementation is bad. Make sure the `<Inner as AsyncRead>::poll_read()` implementation does not read from the passed `buf` before writing to it first.
-	unsafe {
-		let _ = archive_stream_unsafe::<Inner, Packet, L>(inner, buffer).await?;
+	buffer.clear();
+
+	// Read Length
+	let mut length_buf = L::Buffer::default();
+	let length_buf = L::as_slice(&mut length_buf);
+	inner.read_exact(&mut *length_buf).await?;
+	let (archive_len, unused) =
+		L::decode(length_buf).map_err(|_| RkyvCodecError::ReadLengthError)?;
+
+	// If not enough capacity in buffer to fit `archive_len`, reserve more.
+	if buffer.capacity() < archive_len {
+		buffer.reserve(archive_len - buffer.len())
 	}
+	// Write any potentially unused bytes from length_buf to buffer
+	buffer.extend_from_slice(unused);
+
+	// Safety: Caller should make sure that reader does not read from this potentially uninitialized buffer passed to poll_read()
+	unsafe { buffer.set_len(archive_len) }
+
+	println!("buffer_len: {:?}, unused: {:?}", buffer.len(), unused);
+
+	// Read into buffer, after any unused length bytes
+	inner.read_exact(&mut buffer[unused.len()..]).await?;
 
 	let archive = rkyv::check_archived_root::<'b, Packet>(buffer)
 		.map_err(|_| RkyvCodecError::CheckArchiveError)?;
