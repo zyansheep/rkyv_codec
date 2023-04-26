@@ -26,7 +26,8 @@ To run:
 Simple usage example:
 ```rust
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
-#[archive_attr(derive(CheckBytes, Debug))] // Checkbytes is required
+#[archive(check_bytes)] // check_bytes is required
+#[archive_attr(derive(Debug))]
 struct Test {
     int: u8,
     string: String,

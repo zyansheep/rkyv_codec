@@ -1,6 +1,5 @@
 use std::marker::PhantomData;
 
-use bytecheck::CheckBytes;
 use bytes_old::Buf;
 use futures_codec::{BytesMut, Decoder, Encoder};
 use rkyv::{
@@ -70,7 +69,7 @@ where
 impl<Packet, L: LengthCodec> Decoder for RkyvCodec<Packet, L>
 where
 	Packet: Archive + 'static,
-	Packet::Archived: for<'b> CheckBytes<rkyv::validation::validators::DefaultValidator<'b>>
+	Packet::Archived: for<'b> rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'b>>
 		+ Deserialize<Packet, Infallible>,
 {
 	type Item = Packet;

@@ -8,7 +8,6 @@ use std::{
 
 use pin_project::pin_project;
 
-use bytecheck::CheckBytes;
 use rkyv::{
 	ser::{
 		serializers::{
@@ -36,7 +35,13 @@ pub async fn archive_sink<'b, Inner: AsyncWrite + Unpin, L: LengthCodec>(
 }
 /// Reads a single `&Archived<Object>` from an `AsyncRead` without checking for correct byte formatting
 /// # Safety
-/// This will cause undefined behavior if the bytestream is not the correct format (i.e. not generated through `archive_sink[_bytes]`, `RkyvWriter`, or `RkyvCodec`) with the correct LengthCodec
+/// This may cause undefined behavior if the bytestream is not a valid archive (i.e. not generated through `archive_sink[_bytes]`, or `RkyvWriter`)
+///
+/// As an optimisation, this function may pass uninitialized bytes to the reader for the reader to read into. Make sure the particular reader in question is implemented correctly and does not read from its passed buffer in the poll_read() function without first writing to it.
+/// # Warning
+/// Passed buffer is reallocated so it may fit the size of the packet being written. This may allow for DOS attacks if remote sends too large a length encoding
+/// # Errors
+/// Will return an error if there are not enough bytes to read to read the length of the packet, or read the packet itself. Will also return an error if the length encoding format is invalid.
 pub async unsafe fn archive_stream_unsafe<
 	'b,
 	Inner: AsyncRead + Unpin,
@@ -52,19 +57,26 @@ pub async unsafe fn archive_stream_unsafe<
 	let mut length_buf = L::Buffer::default();
 	let length_buf = L::as_slice(&mut length_buf);
 	inner.read_exact(&mut *length_buf).await?;
-	let (archive_len, remaining) =
+	let (archive_len, unused) =
 		L::decode(length_buf).map_err(|_| RkyvCodecError::ReadLengthError)?;
 
-	// Reserve buffer
+	// Reserve enough bytes in buffer to contain
 	buffer.reserve(archive_len - buffer.len()); // Reserve at least the amount of bytes needed
-											// Safety: Already reserved the required space
-	unsafe {
-		buffer.set_len(archive_len);
+
+	// If not enough capacity in buffer to fit `archive_len`, reserve more.
+	if buffer.capacity() < archive_len {
+		buffer.reserve(buffer.capacity() - archive_len)
 	}
+	// Write any potentially unused bytes from length_buf to buffer
+	buffer.extend_from_slice(unused);
 
-	buffer[0..remaining.len()].copy_from_slice(remaining); // Copy unread length_buf bytes to buffer
+	// Safety: Caller should make sure that reader does not read from this potentially uninitialized buffer passed to poll_read()
+	unsafe { buffer.set_len(archive_len) }
 
-	inner.read_exact(&mut buffer[remaining.len()..]).await?;
+	// Read into buffer, after any unused length bytes
+	inner.read_exact(&mut buffer[unused.len()..]).await?;
+
+	// Safety: Caller should make sure that reader does not produce invalid packets.
 	unsafe { Ok(rkyv::archived_root::<Packet>(buffer)) }
 }
 
@@ -72,37 +84,30 @@ pub async unsafe fn archive_stream_unsafe<
 ///
 /// Until streaming iterators (and streaming futures) are implemented in rust, this currently the fastest method I could come up with that requires no recurring heap allocations.
 ///
-/// Requires rkyv validation feature & CheckBytes
+/// Requires rkyv "validation" feature
+/// # Safety
+/// As an optimisation, this function may pass uninitialized bytes to the reader for the reader to read into. Make sure the particular reader in question is implemented correctly and does not read from its passed buffer in the poll_read() function without first writing to it.
+/// # Warning
+/// Passed buffer is reallocated so it may fit the size of the packet being written. This may allow for DOS attacks if remote sends too large a length encoding
+/// # Errors
+/// Will return an error if there are not enough bytes to read to read the length of the packet, or read the packet itself. Will also return an error if the length encoding format is invalid or the packet archive itself is invalid.
 pub async fn archive_stream<'b, Inner: AsyncRead + Unpin, Packet, L: LengthCodec>(
 	inner: &mut Inner,
 	buffer: &'b mut AlignedVec,
 ) -> Result<&'b Archived<Packet>, RkyvCodecError>
 where
 	Packet: rkyv::Archive,
-	Packet::Archived: CheckBytes<DefaultValidator<'b>> + 'b,
+	Packet::Archived: rkyv::CheckBytes<DefaultValidator<'b>>,
 {
-	buffer.clear();
-
-	// Read length
-	let mut length_buf = L::Buffer::default();
-	let length_buf = L::as_slice(&mut length_buf);
-	inner.read_exact(length_buf).await?;
-	let (archive_len, remaining) =
-		L::decode(length_buf).map_err(|_| RkyvCodecError::ReadLengthError)?;
-
-	// Reserve buffer
-	buffer.reserve(archive_len - buffer.len()); // Reserve at least the amount of bytes needed for packet
-											// Safety: Already reserved the required space
+	// Safety: This should not trigger undefined behavior as even if the packet in question is an invalid archive, the archive is not actually read from.
+	// Safety: Even though this is not an unsafe function, it may under some circumstances produce undefined behavior if the AsyncRead implementation is bad. Make sure the `<Inner as AsyncRead>::poll_read()` implementation does not read from the passed `buf` before writing to it first.
 	unsafe {
-		buffer.set_len(archive_len);
+		let _ = archive_stream_unsafe::<Inner, Packet, L>(inner, buffer).await?;
 	}
-
-	// Read into aligned buffer
-	buffer[0..remaining.len()].copy_from_slice(remaining); // Copy unread length_buf bytes to buffer
-	inner.read_exact(&mut buffer[remaining.len()..]).await?; // Read into buffer after the appended bytes
 
 	let archive = rkyv::check_archived_root::<'b, Packet>(buffer)
 		.map_err(|_| RkyvCodecError::CheckArchiveError)?;
+
 	Ok(archive)
 }
 
@@ -225,7 +230,6 @@ mod tests {
 	extern crate test;
 
 	use async_std::task::block_on;
-	use bytecheck::CheckBytes;
 	use futures::{io::Cursor, AsyncRead, AsyncWrite, SinkExt, StreamExt, TryStreamExt};
 	use futures_codec::{CborCodec, Framed};
 	use rkyv::{to_bytes, AlignedVec, Archive, Archived, Deserialize, Infallible, Serialize};
@@ -248,9 +252,9 @@ mod tests {
 		serde::Deserialize,
 	)]
 	// This will generate a PartialEq impl between our unarchived and archived types
-	#[archive(compare(PartialEq))]
-	// To use the safe API, you have to derive CheckBytes for the archived type
-	#[archive_attr(derive(CheckBytes, Debug))]
+	// To use the safe API, you have to use the check_byte option for the archived type
+	#[archive(compare(PartialEq), check_bytes)]
+	#[archive_attr(derive(Debug))]
 	struct Test {
 		int: u8,
 		string: String,

@@ -3,7 +3,6 @@ use std::{fmt, io::Write};
 use async_std::{io, net::TcpStream};
 use futures::{FutureExt, SinkExt};
 
-use bytecheck::CheckBytes;
 use rkyv::{AlignedVec, Archive, Deserialize, Infallible, Serialize};
 
 use rkyv_codec::{archive_stream, RkyvWriter, VarintLength};
@@ -12,9 +11,9 @@ use rustyline_async::{Readline, ReadlineError};
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
 // This will generate a PartialEq impl between our unarchived and archived types
-#[archive(compare(PartialEq))]
-// To use the safe API, you have to derive CheckBytes for the archived type
-#[archive_attr(derive(CheckBytes, Debug))]
+// To use the safe API, you must use the check_bytes option for the archive
+#[archive(compare(PartialEq), check_bytes)]
+#[archive_attr(derive(Debug))]
 struct ChatMessage {
 	sender: Option<String>,
 	message: String,

@@ -5,11 +5,11 @@
 //! ```rust
 //! # use rkyv::{Infallible, Archived, AlignedVec, Archive, Serialize, Deserialize};
 //! # use rkyv_codec::{archive_stream, RkyvWriter, VarintLength};
-//! # use bytecheck::CheckBytes;
 //! # use futures::SinkExt;
 //! # async_std::task::block_on(async {
 //! #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
-//! #[archive_attr(derive(CheckBytes, Debug))] // Checkbytes is required
+//! #[archive(check_bytes)] // check_bytes is required
+//! #[archive_attr(derive(Debug))]
 //! struct Test {
 //!     int: u8,
 //!     string: String,
@@ -129,8 +129,7 @@ mod no_std_feature {
 	) -> Result<&'b Archived<Packet>, RkyvCodecError>
 	where
 		Packet: rkyv::Archive,
-		Packet::Archived:
-			bytecheck::CheckBytes<rkyv::validation::validators::DefaultValidator<'b>> + 'b,
+		Packet::Archived: rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'b>> + 'b,
 	{
 		// Read length
 		let mut length_buf = L::Buffer::default();
@@ -161,7 +160,6 @@ mod tests {
 	extern crate test;
 
 	use async_std::task::block_on;
-	use bytecheck::CheckBytes;
 	use bytes::BytesMut;
 	use futures::{io::Cursor, AsyncRead, AsyncWrite, SinkExt, StreamExt, TryStreamExt};
 	use futures_codec::{CborCodec, Framed};
@@ -185,9 +183,9 @@ mod tests {
 		serde::Deserialize,
 	)]
 	// This will generate a PartialEq impl between our unarchived and archived types
-	#[archive(compare(PartialEq))]
-	// To use the safe API, you have to derive CheckBytes for the archived type
-	#[archive_attr(derive(CheckBytes, Debug))]
+	// To use the safe API, you have to use the check_bytes option for the archive
+	#[archive(compare(PartialEq), check_bytes)]
+	#[archive_attr(derive(Debug))]
 	struct Test {
 		int: u8,
 		string: String,
