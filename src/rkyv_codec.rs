@@ -70,7 +70,7 @@ pub async unsafe fn archive_stream_unsafe<
 	// Safety: Caller should make sure that reader does not read from this potentially uninitialized buffer passed to poll_read()
 	unsafe { buffer.set_len(archive_len) }
 
-	println!("buffer_len: {:?}, unused: {:?}", buffer.len(), unused);
+	// println!("buffer_len: {:?}, unused: {:?}", buffer.len(), unused);
 
 	// Read into buffer, after any unused length bytes
 	inner.read_exact(&mut buffer[unused.len()..]).await?;
@@ -117,7 +117,7 @@ where
 	// Safety: Caller should make sure that reader does not read from this potentially uninitialized buffer passed to poll_read()
 	unsafe { buffer.set_len(archive_len) }
 
-	println!("buffer_len: {:?}, unused: {:?}", buffer.len(), unused);
+	// println!("buffer_len: {:?}, unused: {:?}", buffer.len(), unused);
 
 	// Read into buffer, after any unused length bytes
 	inner.read_exact(&mut buffer[unused.len()..]).await?;
