@@ -24,7 +24,7 @@ struct ChatMessage {
 }
 
 // Process a given TcpStream
-async fn process(
+async fn handle_conn(
 	stream: TcpStream,
 	outgoing: Sender<ChatMessage>,
 	mut incoming: Receiver<ChatMessage>,
@@ -74,24 +74,23 @@ async fn process(
 
 #[async_std::main]
 async fn main() -> io::Result<()> {
-	let listener = TcpListener::bind("127.0.0.1:8080").await?;
+	let listener = TcpListener::bind("127.0.0.1:8080").await?; // Bind to local addr
 	println!("Listening on {}", listener.local_addr()?);
 
-	let mut incoming = listener.incoming();
-
-	// Broadcast channels
+	// Init broadcast channels
 	let (broadcast_sender, broadcast_receiver) = async_broadcast::broadcast::<ChatMessage>(20);
 
 	// Listen for incoming connections
+	let mut incoming = listener.incoming();
 	while let Some(stream) = incoming.next().await {
 		match stream {
 			Ok(stream) => {
-				let outgoing = broadcast_sender.clone();
+				let outgoing = broadcast_sender.clone(); // clone the channels
 				let incoming = broadcast_receiver.clone();
 
-				task::spawn(async move {
+				task::spawn(async move { // spawn a greenthread to handle the connection
 					let addr = stream.peer_addr().unwrap();
-					if let Err(err) = process(stream, outgoing, incoming, &addr).await {
+					if let Err(err) = handle_conn(stream, outgoing, incoming, &addr).await {
 						println!("[{addr}] error: {err}")
 					}
 				});
