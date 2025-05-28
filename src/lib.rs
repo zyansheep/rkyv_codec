@@ -80,11 +80,11 @@ pub use crate::rkyv_codec::*;
 mod no_std_feature {
 	use bytes::{Buf, BufMut, Bytes, BytesMut};
 	use rkyv::{
-		api::high::HighValidator, bytecheck::CheckBytes, rancor, util::AlignedVec, Archive,
-		Archived,
+		Archive, Archived, api::high::HighValidator, bytecheck::CheckBytes, rancor,
+		util::AlignedVec,
 	};
 
-	use crate::{length_codec::LengthCodec, RkyvCodecError};
+	use crate::{RkyvCodecError, length_codec::LengthCodec};
 
 	/// Writes a single `Object` from a `bytes::Bytes`
 	pub fn archive_sink_bytes<Packet: Archive, L: LengthCodec>(
@@ -120,7 +120,7 @@ mod no_std_feature {
 		buffer.extend_from_slice(&bytes[begin..end]);
 		bytes.advance(end);
 
-		let archive = rkyv::access_unchecked::<Packet::Archived>(buffer);
+		let archive = unsafe { rkyv::access_unchecked::<Packet::Archived>(buffer) };
 		Ok(archive)
 	}
 	/// Reads a single `&Archived<Object>` from a `bytes::Bytes` into the passed buffer if
@@ -160,16 +160,15 @@ mod tests {
 	extern crate test;
 
 	use async_std::task::block_on;
+	use asynchronous_codec::{CborCodec, Framed};
 	use bytes::BytesMut;
-	use futures::{io::Cursor, AsyncRead, AsyncWrite, SinkExt, StreamExt, TryStreamExt};
-	use futures_codec::{CborCodec, Framed};
-	use rkyv::{rancor, to_bytes, util::AlignedVec, Archive, Archived, Deserialize, Serialize};
+	use futures::{AsyncRead, AsyncWrite, SinkExt, StreamExt, TryStreamExt, io::Cursor};
+	use rkyv::{Archive, Archived, Deserialize, Serialize, rancor, to_bytes, util::AlignedVec};
 
 	use crate::{
-		archive_sink, archive_sink_bytes, archive_stream, archive_stream_bytes,
+		RkyvWriter, archive_sink, archive_sink_bytes, archive_stream, archive_stream_bytes,
 		futures_stream::RkyvCodec,
 		length_codec::{LengthCodec, U64Length, VarintLength},
-		RkyvWriter,
 	};
 
 	#[derive(
@@ -279,12 +278,12 @@ mod tests {
 	async fn futures_ser_de() {
 		let codec = RkyvCodec::<Test, VarintLength>::default();
 		let mut buffer = vec![0u8; 256];
-		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
+		let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
 		framed.send(TEST.clone()).await.unwrap();
 
-		let (_, codec) = framed.release();
+		let codec = framed.into_parts().codec;
 
-		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
+		let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
 		let received_value = framed.next().await.unwrap().unwrap();
 
 		assert_eq!(*TEST, received_value);
@@ -298,9 +297,9 @@ mod tests {
 
 		framed.send(TEST.clone()).await.unwrap();
 
-		let (_, codec) = framed.release();
+		let codec = framed.into_parts().codec;
 
-		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
+		let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
 		let received_value = framed.next().await.unwrap().unwrap();
 
 		assert_eq!(*TEST, received_value);
@@ -390,13 +389,13 @@ mod tests {
 		});
 	}
 	#[bench]
-	fn bench_rkyv_futures_codec_sink_50(b: &mut Bencher) {
+	fn bench_rkyv_asynchronous_codec_sink_50(b: &mut Bencher) {
 		let mut buffer = Vec::with_capacity(1024);
 		b.iter(|| {
 			block_on(async {
 				buffer.clear();
 				let codec = RkyvCodec::<Test, VarintLength>::default();
-				let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
+				let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
 				for _ in 0..50 {
 					framed.send(TEST.clone()).await.unwrap();
 				}
@@ -405,13 +404,13 @@ mod tests {
 		block_on(consume_amount::<_, VarintLength>(&mut &buffer[..], 50));
 	}
 	#[bench]
-	fn bench_rkyv_futures_codec_stream_50(b: &mut Bencher) {
+	fn bench_rkyv_asynchronous_codec_stream_50(b: &mut Bencher) {
 		let mut buffer = Vec::with_capacity(1024);
 
 		block_on(gen_amount::<_, VarintLength>(&mut buffer, 50));
 
 		let codec = RkyvCodec::<Test, VarintLength>::default();
-		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
+		let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
 		b.iter(|| {
 			block_on(async {
 				framed.set_position(0);
@@ -449,8 +448,9 @@ mod tests {
 			}
 		});
 
-		let (_, codec) = framed.release();
-		let mut framed = futures_codec::Framed::new(Cursor::new(&mut buffer), codec);
+		let codec = framed.into_parts().codec;
+
+		let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
 
 		b.iter(|| {
 			block_on(async {

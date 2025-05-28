@@ -1,8 +1,9 @@
 use std::marker::PhantomData;
 
-use bytes_old::Buf;
-use futures_codec::{BytesMut, Decoder, Encoder};
+use asynchronous_codec::{BytesMut, Decoder, Encoder};
+use bytes::Buf;
 use rkyv::{
+	Archive, Archived, Deserialize, Portable, Serialize,
 	api::{
 		high::{HighDeserializer, HighSerializer, HighValidator},
 		serialize_using,
@@ -10,15 +11,14 @@ use rkyv::{
 	de::Pool,
 	rancor,
 	ser::{
+		Serializer,
 		allocator::{Arena, ArenaHandle},
 		sharing::Share,
-		Serializer,
 	},
 	util::AlignedVec,
-	Archive, Archived, Deserialize, Portable, Serialize,
 };
 
-use crate::{length_codec::LengthCodec, RkyvCodecError};
+use crate::{RkyvCodecError, length_codec::LengthCodec};
 
 pub struct RkyvCodec<Packet: Archive, L: LengthCodec> {
 	_data: PhantomData<Packet>,
@@ -48,10 +48,10 @@ impl<Packet, L: LengthCodec> Encoder for RkyvCodec<Packet, L>
 where
 	Packet: Archive + for<'b> Serialize<HighSerializer<AlignedVec, ArenaHandle<'b>, rancor::Error>>,
 {
-	type Item = Packet;
+	type Item<'a> = Packet;
 	type Error = RkyvCodecError;
 
-	fn encode(&mut self, data: Self::Item, buf: &mut BytesMut) -> Result<(), Self::Error> {
+	fn encode<'a>(&mut self, data: Self::Item<'a>, buf: &mut BytesMut) -> Result<(), Self::Error> {
 		let mut encode_buffer = self.encode_buffer.take().unwrap();
 		let share = self.ser_share.take().unwrap();
 		encode_buffer.clear();
