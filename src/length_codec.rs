@@ -131,91 +131,139 @@ impl fmt::Display for NotEnoughBytesError {
 
 impl error::Error for NotEnoughBytesError {}
 
-/// Big-endian 32-bit length encoding, can handle lengths up to 2^32
-#[derive(Debug)]
-pub struct U32Length;
-impl LengthCodec for U32Length {
-	type Error = NotEnoughBytesError;
-	type Buffer = [u8; 4];
+macro_rules! impl_uint_length_codec {
+	($name:ident, $uint_type:ty, $byte_count:expr) => {
+		/// Big-endian fixed-size integer length encoding.
+		#[derive(Debug)]
+		pub struct $name;
 
-	#[inline]
-	fn as_slice(buffer: &mut Self::Buffer) -> &mut [u8] {
-		&mut buffer[..]
-	}
+		impl LengthCodec for $name {
+			type Error = NotEnoughBytesError;
+			type Buffer = [u8; $byte_count];
 
-	#[inline]
-	fn encode(length: usize, buf: &mut Self::Buffer) -> &[u8] {
-		*buf = u32::to_be_bytes(length as u32);
-		&buf[..]
-	}
+			#[inline]
+			fn as_slice(buffer: &mut Self::Buffer) -> &mut [u8] {
+				&mut buffer[..]
+			}
 
-	#[inline]
-	fn decode(buf: &[u8]) -> Result<(usize, &[u8]), Self::Error> {
-		let bytes: [u8; 4] = buf.try_into().map_err(|_| NotEnoughBytesError)?;
-		Ok((u32::from_be_bytes(bytes) as usize, &buf[4..]))
-	}
+			#[inline]
+			fn encode(length: usize, buf: &mut Self::Buffer) -> &[u8] {
+				*buf = <$uint_type>::to_be_bytes(length as $uint_type);
+				&buf[..]
+			}
 
-	#[cfg(feature = "std")]
-	async fn decode_async<'a, R: AsyncBufRead + Unpin>(
-		reader: &'a mut R,
-	) -> Result<usize, WithIOError<Self::Error>> {
-		let mut buffer = Self::Buffer::default();
-		reader
-			.read_exact(Self::as_slice(&mut buffer))
-			.await
-			.map_err(|e| {
-				if e.kind() == std::io::ErrorKind::UnexpectedEof {
-					WithIOError::LengthDecodeError(NotEnoughBytesError)
-				} else {
-					WithIOError::IoError(e)
+			#[inline]
+			fn decode(buf: &[u8]) -> Result<(usize, &[u8]), Self::Error> {
+				if buf.len() < $byte_count {
+					return Err(NotEnoughBytesError);
 				}
-			})?;
-		Self::decode(&buffer)
-			.map(|(len, _)| len)
-			.map_err(WithIOError::LengthDecodeError)
-	}
+				let (int_bytes, rest) = buf.split_at($byte_count);
+				let bytes: [u8; $byte_count] =
+					int_bytes.try_into().map_err(|_| NotEnoughBytesError)?;
+				Ok((<$uint_type>::from_be_bytes(bytes) as usize, rest))
+			}
+
+			#[cfg(feature = "std")]
+			async fn decode_async<'a, R: AsyncBufRead + AsyncBufReadExt + Unpin>(
+				reader: &'a mut R,
+			) -> Result<usize, WithIOError<Self::Error>> {
+				let mut buffer = Self::Buffer::default();
+				reader
+					.read_exact(Self::as_slice(&mut buffer))
+					.await
+					.map_err(|e| {
+						if e.kind() == std::io::ErrorKind::UnexpectedEof {
+							WithIOError::LengthDecodeError(NotEnoughBytesError)
+						} else {
+							WithIOError::IoError(e)
+						}
+					})?;
+				Self::decode(&buffer)
+					.map(|(len, _)| len)
+					.map_err(WithIOError::LengthDecodeError)
+			}
+		}
+	};
 }
-/// Big-endian 64-bit length encoding, can handle length up to 2^64
-#[derive(Debug)]
-pub struct U64Length;
-impl LengthCodec for U64Length {
-	type Error = NotEnoughBytesError;
-	type Buffer = [u8; 8];
 
-	#[inline]
-	fn as_slice(buffer: &mut Self::Buffer) -> &mut [u8] {
-		&mut buffer[..]
-	}
+// Generate U8Length
+impl_uint_length_codec!(U8Length, u8, 1);
+impl_uint_length_codec!(U16Length, u16, 2);
+impl_uint_length_codec!(U32Length, u32, 4);
+impl_uint_length_codec!(U64Length, u64, 8);
 
-	#[inline]
-	fn encode(length: usize, buf: &mut Self::Buffer) -> &[u8] {
-		*buf = u64::to_be_bytes(length as u64);
-		&buf[..]
-	}
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use paste::paste; // For concatenating identifiers in macro
 
-	#[inline]
-	fn decode(buf: &[u8]) -> Result<(usize, &[u8]), Self::Error> {
-		let bytes: [u8; 8] = buf.try_into().map_err(|_| NotEnoughBytesError)?;
-		Ok((u64::from_be_bytes(bytes) as usize, &buf[8..]))
-	}
+	macro_rules! impl_uint_length_codec_tests {
+		($test_suffix:ident, $codec_type:ty, $test_value:expr, $encoded_bytes:expr, $byte_count:expr) => {
+			paste! {
+				#[test]
+				fn [<test_ $test_suffix _length_codec>]() {
+					let mut buf = <$codec_type as LengthCodec>::Buffer::default();
+					let encoded = <$codec_type>::encode($test_value, &mut buf);
+					assert_eq!(encoded, $encoded_bytes);
+					let (decoded, rest) = <$codec_type>::decode(encoded).unwrap();
+					assert_eq!(decoded, $test_value);
+					assert!(rest.is_empty());
 
-	#[cfg(feature = "std")]
-	async fn decode_async<'a, R: AsyncBufRead + AsyncBufReadExt + Unpin>(
-		reader: &'a mut R,
-	) -> Result<usize, WithIOError<Self::Error>> {
-		let mut buffer = Self::Buffer::default();
-		reader
-			.read_exact(Self::as_slice(&mut buffer))
-			.await
-			.map_err(|e| {
-				if e.kind() == std::io::ErrorKind::UnexpectedEof {
-					WithIOError::LengthDecodeError(NotEnoughBytesError)
-				} else {
-					WithIOError::IoError(e)
+					// Test decoding with extra bytes
+					let mut extended_bytes: Vec<u8> = ($encoded_bytes).to_vec();
+					extended_bytes.extend_from_slice(&[1, 2, 3]);
+					let (decoded_partial, rest_partial) = <$codec_type>::decode(&extended_bytes).unwrap();
+					assert_eq!(decoded_partial, $test_value);
+					assert_eq!(rest_partial, &[1, 2, 3]);
+
+					// Test decoding insufficient bytes
+					if $byte_count > 0 {
+						let short_bytes = &$encoded_bytes[..$byte_count -1];
+						assert_eq!(<$codec_type>::decode(short_bytes), Err(NotEnoughBytesError));
+					}
+					assert_eq!(<$codec_type>::decode(&[]), Err(NotEnoughBytesError));
 				}
-			})?;
-		Self::decode(&buffer)
-			.map(|(len, _)| len)
-			.map_err(WithIOError::LengthDecodeError)
+
+				#[cfg(feature = "std")]
+				#[async_std::test]
+				async fn [<test_ $test_suffix _decode_async>]() {
+					let data = $encoded_bytes;
+					let mut reader = &data[..];
+					let len = <$codec_type>::decode_async(&mut reader).await.unwrap();
+					assert_eq!(len, $test_value);
+
+					if $byte_count > 0 {
+						let data_short = &$encoded_bytes[..$byte_count-1];
+						let mut reader_short = &data_short[..];
+						let err = <$codec_type>::decode_async(&mut reader_short)
+							.await
+							.unwrap_err();
+						match err {
+							WithIOError::LengthDecodeError(NotEnoughBytesError) => {}
+							_ => panic!("Unexpected error type for short data: {:?}", err),
+						}
+					}
+
+					let data_empty: [u8;0] = [];
+					let mut reader_empty = &data_empty[..];
+					let err_empty = <$codec_type>::decode_async(&mut reader_empty).await.unwrap_err();
+					match err_empty {
+						WithIOError::LengthDecodeError(NotEnoughBytesError) => {}
+						_ => panic!("Unexpected error type for empty data: {:?}", err_empty),
+					}
+				}
+			}
+		};
 	}
+
+	impl_uint_length_codec_tests!(u8, U8Length, 42, &[42], 1);
+	impl_uint_length_codec_tests!(u16, U16Length, 300, &[1, 44], 2); // 0x012C
+	impl_uint_length_codec_tests!(u32, U32Length, 70000, &[0, 1, 17, 112], 4); // 0x00011170
+	impl_uint_length_codec_tests!(
+		u64,
+		U64Length,
+		1_000_000_000_000,
+		&[0, 0, 0, 232, 212, 165, 16, 0],
+		8
+	); // 0x000000E8_D4A51000
 }
