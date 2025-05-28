@@ -7,11 +7,11 @@ use async_std::{
 	net::{TcpListener, TcpStream},
 	task,
 };
-use futures::{prelude::*, SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, prelude::*};
 
-use rkyv::{rancor, util::AlignedVec, Archive, Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize, rancor, util::AlignedVec};
 
-use rkyv_codec::{archive_stream, RkyvWriter, VarintLength};
+use rkyv_codec::{RkyvWriter, VarintLength, archive_stream};
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
 // This will generate a PartialEq impl between our unarchived and archived types

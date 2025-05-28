@@ -9,20 +9,22 @@ repository = "https://github.com/zyansheep/rkyv_codec"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rkyv = { version = "0.8" }
-futures = "0.3"
+rkyv = { version = "0.8", default-features = false, features = [
+	"bytecheck",
+	"alloc",
+] }
 pin-project = "1.1"
-unsigned-varint = { version = "0.8", features = ["futures"] }
+unsigned-varint = { version = "0.8", optional = true }
+futures = { version = "0.3", optional = true }
 asynchronous-codec = { version = "0.7", optional = true }
 bytes = { version = "1.10" }
-thiserror = "2.0"
+thiserror = { version = "1.0", package = "thiserror-core", default-features = false }
 
 [dev-dependencies]
-# CBOR for comparison benchmarks
-asynchronous-codec = { version = "0.7", features = ["cbor"] }
 # Runtime
 async-std = { version = "1.13.0", features = ["attributes"] }
 # For tests & benchmark comparisons
+asynchronous-codec = { version = "0.7", features = ["cbor"] }
 serde = "^1.0"
 lazy_static = "1.5.0"
 # For examples
@@ -31,16 +33,21 @@ rustyline-async = "0.4.0"
 anyhow = "1.0"
 
 [features]
-default = ["futures_stream", "std"]
-std = []
+default = ["futures_stream", "std", "varint"]
+varint = ["unsigned-varint"]
+std = ["thiserror/std", "rkyv/std", "futures"]
 futures_stream = ["asynchronous-codec"]
 
 [workspace]
 members = ["examples/no-std"]
 
-[workspace.metadata.nix]
-systems = ["x86_64-linux"]
+[[example]]
+name = "chat_server"
+required-features = ["std", "varint"]
 
-[package.metadata.nix]
-app = true
-build = true
+[[example]]
+name = "chat_client"
+required-features = ["std", "varint"]
+
+[package.metadata."docs.rs"]
+all-features = true

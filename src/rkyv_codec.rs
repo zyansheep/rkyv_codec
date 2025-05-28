@@ -1,4 +1,4 @@
-use futures::{ready, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Sink};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Sink, ready};
 use std::{
 	ops::Range,
 	pin::Pin,
@@ -8,21 +8,21 @@ use std::{
 use pin_project::pin_project;
 
 use rkyv::{
+	Archive, Archived, Portable, Serialize,
 	api::{
 		high::{HighSerializer, HighValidator},
 		serialize_using,
 	},
 	rancor,
 	ser::{
+		Serializer,
 		allocator::{Arena, ArenaHandle},
 		sharing::Share,
-		Serializer,
 	},
 	util::AlignedVec,
-	Archive, Archived, Portable, Serialize,
 };
 
-use crate::{length_codec::LengthCodec, RkyvCodecError};
+use crate::{RkyvCodecError, length_codec::LengthCodec};
 
 /// Rewrites a single buffer representing an Archive to an `AsyncWrite`
 pub async fn archive_sink<'b, Inner: AsyncWrite + Unpin, L: LengthCodec>(

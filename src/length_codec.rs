@@ -11,7 +11,9 @@ pub trait LengthCodec: 'static {
 }
 
 /// Variable-bit length encoding based using unsigned_varint crate, currently can handle lengths up to 2^63
+#[cfg(feature = "varint")]
 pub struct VarintLength;
+#[cfg(feature = "varint")]
 impl LengthCodec for VarintLength {
 	type Error = unsigned_varint::decode::Error;
 	type Buffer = [u8; 10];
