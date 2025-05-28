@@ -72,8 +72,6 @@ pub async unsafe fn archive_stream_unsafe<
 	// Safety: Caller should make sure that reader does not read from this potentially uninitialized buffer passed to poll_read()
 	unsafe { buffer.set_len(archive_len) }
 
-	// println!("buffer_len: {:?}, unused: {:?}", buffer.len(), unused);
-
 	// Read into buffer, after any unused length bytes
 	inner.read_exact(&mut buffer[unused.len()..]).await?;
 
@@ -118,8 +116,6 @@ where
 
 	// Safety: Caller should make sure that reader does not read from this potentially uninitialized buffer passed to poll_read()
 	unsafe { buffer.set_len(archive_len) }
-
-	// println!("buffer_len: {:?}, unused: {:?}", buffer.len(), unused);
 
 	// Read into buffer, after any unused length bytes
 	inner.read_exact(&mut buffer[unused.len()..]).await?;
@@ -178,7 +174,6 @@ where
 
 	fn start_send(self: Pin<&mut Self>, item: &Packet) -> Result<(), Self::Error> {
 		let this = self.project();
-		println!("serializing: {:?}", item);
 		let buffer_len = {
 			// Serializer
 			let mut buffer = this.buffer.take().unwrap();
@@ -189,22 +184,14 @@ where
 			let _ = serialize_using(item, &mut serializer)?;
 
 			let (buffer, _, share) = serializer.into_raw_parts();
-			println!("buffer: {buffer:?}");
 			let buffer_len = buffer.len();
 			*this.buffer = Some(buffer);
 			*this.share = Some(share);
-			println!(
-				"this buffer: {:?}, this share: {:?}",
-				this.buffer, this.share
-			);
 			buffer_len
 		};
 
 		*this.len_state = 0..L::encode(buffer_len, this.length_buffer).len();
 		*this.buf_state = 0;
-		println!("buffer: {:?}", this.buffer);
-		println!("buf_state: {:?}", this.buf_state);
-		println!("len_state: {:?}", this.len_state);
 
 		Ok(())
 	}

@@ -246,7 +246,6 @@ mod tests {
 			.unwrap();
 
 		let mut reader = &writer[..];
-		println!("archive_sink bytes: {:?}", reader);
 
 		let mut buffer = AlignedVec::with_capacity(256);
 		let data: &Archived<Test> =
@@ -266,8 +265,6 @@ mod tests {
 		sink.send(&*TEST).await.unwrap();
 
 		let mut reader = &writer[..];
-		println!("archived: {:?}", *TEST_BYTES);
-		println!("reader: {reader:?}");
 
 		let mut buffer = AlignedVec::with_capacity(256);
 		let data: &Archived<Test> =
