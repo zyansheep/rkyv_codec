@@ -3,9 +3,9 @@ use std::{fmt, io::Write};
 use async_std::{io, net::TcpStream};
 use futures::{FutureExt, SinkExt};
 
-use rkyv::{rancor, util::AlignedVec, Archive, Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize, rancor, util::AlignedVec};
 
-use rkyv_codec::{archive_stream, RkyvWriter, VarintLength};
+use rkyv_codec::{RkyvWriter, VarintLength, archive_stream};
 
 use rustyline_async::{Readline, ReadlineEvent};
 
@@ -31,7 +31,7 @@ impl fmt::Display for ChatMessage {
 #[async_std::main]
 async fn main() -> io::Result<()> {
 	// Connect to server
-	let mut tcp_stream = TcpStream::connect("127.0.0.1:8080").await?;
+	let tcp_stream = TcpStream::connect("127.0.0.1:8080").await?;
 	println!("Connected to {}", &tcp_stream.peer_addr()?);
 
 	// Setup outgoing packet stream
@@ -41,6 +41,9 @@ async fn main() -> io::Result<()> {
 	let mut buffer = AlignedVec::new();
 
 	let (mut rl, mut writer) = Readline::new("> ".to_owned()).unwrap();
+
+	// buffer the tcp stream
+	let mut tcp_stream = futures::io::BufReader::new(tcp_stream);
 
 	loop {
 		futures::select! {

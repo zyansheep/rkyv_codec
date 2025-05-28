@@ -49,7 +49,7 @@ where
 	Packet: Archive + for<'b> Serialize<HighSerializer<AlignedVec, ArenaHandle<'b>, rancor::Error>>,
 {
 	type Item<'a> = Packet;
-	type Error = RkyvCodecError;
+	type Error = RkyvCodecError<L>;
 
 	fn encode<'a>(&mut self, data: Self::Item<'a>, buf: &mut BytesMut) -> Result<(), Self::Error> {
 		let mut encode_buffer = self.encode_buffer.take().unwrap();
@@ -80,7 +80,7 @@ where
 		+ Deserialize<Packet, HighDeserializer<rancor::Error>>,
 {
 	type Item = Packet;
-	type Error = RkyvCodecError;
+	type Error = RkyvCodecError<L>;
 
 	fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
 		if buf.is_empty() {
@@ -88,7 +88,7 @@ where
 		}
 		self.decode_buffer.clear();
 
-		let (length, remaining) = L::decode(buf).map_err(|_| RkyvCodecError::ReadLengthError)?;
+		let (length, remaining) = L::decode(buf).map_err(RkyvCodecError::ReadLengthError)?;
 		self.decode_buffer.extend_from_slice(&remaining[0..length]);
 		let archive: &Archived<Packet> = rkyv::access::<_, rancor::Error>(&self.decode_buffer)?;
 		let packet: Packet =

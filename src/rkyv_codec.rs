@@ -1,4 +1,4 @@
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Sink, ready};
+use futures::{AsyncBufRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Sink, ready};
 use std::{
 	ops::Range,
 	pin::Pin,
@@ -28,7 +28,7 @@ use crate::{RkyvCodecError, length_codec::LengthCodec};
 pub async fn archive_sink<'b, Inner: AsyncWrite + Unpin, L: LengthCodec>(
 	inner: &mut Inner,
 	archived: &[u8],
-) -> Result<(), RkyvCodecError> {
+) -> Result<(), RkyvCodecError<L>> {
 	let length_buf = &mut L::Buffer::default();
 	let length_buf = L::encode(archived.len(), length_buf);
 	inner.write_all(length_buf).await?;
@@ -46,34 +46,28 @@ pub async fn archive_sink<'b, Inner: AsyncWrite + Unpin, L: LengthCodec>(
 /// Will return an error if there are not enough bytes to read to read the length of the packet, or read the packet itself. Will also return an error if the length encoding format is invalid.
 pub async unsafe fn archive_stream_unsafe<
 	'b,
-	Inner: AsyncRead + Unpin,
+	Inner: AsyncBufRead + Unpin,
 	Packet: Archive + Portable + 'b,
 	L: LengthCodec,
 >(
 	inner: &mut Inner,
 	buffer: &'b mut AlignedVec,
-) -> Result<&'b Archived<Packet>, RkyvCodecError> {
+) -> Result<&'b Archived<Packet>, RkyvCodecError<L>> {
 	buffer.clear();
 
-	// Read Length
-	let mut length_buf = L::Buffer::default();
-	let length_buf = L::as_slice(&mut length_buf);
-	inner.read_exact(&mut *length_buf).await?;
-	let (archive_len, unused) =
-		L::decode(length_buf).map_err(|_| RkyvCodecError::ReadLengthError)?;
+	// parse archive length
+	let archive_len = L::decode_async(inner).await?;
 
 	// If not enough capacity in buffer to fit `archive_len`, reserve more.
 	if buffer.capacity() < archive_len {
-		buffer.reserve(archive_len - buffer.len())
+		buffer.reserve(archive_len - buffer.capacity())
 	}
-	// Write any potentially unused bytes from length_buf to buffer
-	buffer.extend_from_slice(unused);
 
 	// Safety: Caller should make sure that reader does not read from this potentially uninitialized buffer passed to poll_read()
 	unsafe { buffer.set_len(archive_len) }
 
-	// Read into buffer, after any unused length bytes
-	inner.read_exact(&mut buffer[unused.len()..]).await?;
+	// read exactly amount specified by archive_len into buffer
+	inner.read_exact(buffer).await?;
 
 	// Safety: Caller should make sure that reader does not produce invalid packets.
 	unsafe { Ok(rkyv::access_unchecked(buffer)) }
@@ -90,35 +84,27 @@ pub async unsafe fn archive_stream_unsafe<
 /// Passed buffer is reallocated so it may fit the size of the packet being written. This may allow for DOS attacks if remote sends too large a length encoding
 /// # Errors
 /// Will return an error if there are not enough bytes to read to read the length of the packet, or read the packet itself. Will also return an error if the length encoding format is invalid or the packet archive itself is invalid.
-pub async fn archive_stream<'b, Inner: AsyncRead + Unpin, Packet, L: LengthCodec>(
+pub async fn archive_stream<'b, Inner: AsyncBufRead + Unpin, Packet, L: LengthCodec>(
 	inner: &mut Inner,
 	buffer: &'b mut AlignedVec,
-) -> Result<&'b Archived<Packet>, RkyvCodecError>
+) -> Result<&'b Archived<Packet>, RkyvCodecError<L>>
 where
 	Packet: rkyv::Archive + 'b,
 	Packet::Archived: for<'a> rkyv::bytecheck::CheckBytes<HighValidator<'a, rancor::Error>>,
 {
 	buffer.clear();
 
-	// Read Length
-	let mut length_buf = L::Buffer::default();
-	let length_buf = L::as_slice(&mut length_buf);
-	inner.read_exact(&mut *length_buf).await?;
-	let (archive_len, unused) =
-		L::decode(length_buf).map_err(|_| RkyvCodecError::ReadLengthError)?;
+	let archive_len = L::decode_async(inner).await?;
 
 	// If not enough capacity in buffer to fit `archive_len`, reserve more.
 	if buffer.capacity() < archive_len {
-		buffer.reserve(archive_len - buffer.len())
+		buffer.reserve(archive_len - buffer.capacity())
 	}
-	// Write any potentially unused bytes from length_buf to buffer
-	buffer.extend_from_slice(unused);
 
 	// Safety: Caller should make sure that reader does not read from this potentially uninitialized buffer passed to poll_read()
 	unsafe { buffer.set_len(archive_len) }
 
-	// Read into buffer, after any unused length bytes
-	inner.read_exact(&mut buffer[unused.len()..]).await?;
+	inner.read_exact(buffer).await?;
 
 	let archive = rkyv::access::<Packet::Archived, rancor::Error>(buffer)?;
 
@@ -138,8 +124,8 @@ pub struct RkyvWriter<Writer: AsyncWrite, L: LengthCodec> {
 	share: Option<Share>,
 }
 
-// Safety: This should be safe because while HeapScratch is not Send (because it contains BufferScratch which contains NonNull), that NonNull is not used in a way that violates Send.
-unsafe impl<Writer: AsyncWrite, L: LengthCodec> Send for RkyvWriter<Writer, L> {}
+// Safety: Arena is Send and Share is Send, if Writer is Send RkyvWriter should be Send.
+unsafe impl<Writer: AsyncWrite + Send, L: LengthCodec> Send for RkyvWriter<Writer, L> {}
 
 impl<Writer: AsyncWrite, L: LengthCodec> RkyvWriter<Writer, L> {
 	pub fn new(writer: Writer) -> Self {
@@ -163,7 +149,7 @@ impl<Writer: AsyncWrite, Packet: std::fmt::Debug, L: LengthCodec> Sink<&Packet>
 where
 	Packet: Archive + for<'b> Serialize<HighSerializer<AlignedVec, ArenaHandle<'b>, rancor::Error>>,
 {
-	type Error = RkyvCodecError;
+	type Error = RkyvCodecError<L>;
 
 	fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		self.project()

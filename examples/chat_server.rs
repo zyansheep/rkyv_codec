@@ -37,10 +37,12 @@ async fn handle_conn(
 		})
 		.await?;
 
-	let mut reader = stream.clone();
+	let reader = stream.clone();
 	let mut writer = RkyvWriter::<_, VarintLength>::new(stream);
 
 	let mut buffer = AlignedVec::new();
+
+	let mut reader = futures::io::BufReader::new(reader);
 
 	loop {
 		futures::select! {

@@ -49,21 +49,34 @@ pub use length_codec::VarintLength;
 #[cfg(feature = "futures_stream")]
 mod futures_stream;
 
+use length_codec::LengthCodec;
+
+#[cfg(feature = "std")]
+use length_codec::WithIOError;
+
 /// Error type for rkyv_codec
 use thiserror::Error;
 #[derive(Debug, Error)]
-pub enum RkyvCodecError {
+pub enum RkyvCodecError<L: LengthCodec> {
 	#[cfg(feature = "std")]
 	#[error(transparent)]
 	IoError(#[from] futures::io::Error),
 	#[error("packet not correctly archived: {0}")]
 	CheckArchiveError(#[from] rkyv::rancor::Error),
-	#[error("packet not correctly archived: ???")]
-	CheckArchiveErrorSource,
-	#[error("Failed to parse length")]
-	ReadLengthError,
+	#[error("Failed to parse length: {0}")]
+	ReadLengthError(L::Error),
 	#[error("Premature End of File Error")]
 	EOFError,
+}
+
+#[cfg(feature = "std")]
+impl<L: LengthCodec> From<WithIOError<L::Error>> for RkyvCodecError<L> {
+	fn from(value: WithIOError<L::Error>) -> Self {
+		match value {
+			WithIOError::IoError(err) => RkyvCodecError::IoError(err),
+			WithIOError::LengthDecodeError(err) => RkyvCodecError::ReadLengthError(err),
+		}
+	}
 }
 
 #[cfg(feature = "std")]
@@ -90,7 +103,7 @@ mod no_std_feature {
 	pub fn archive_sink_bytes<Packet: Archive, L: LengthCodec>(
 		bytes: &mut BytesMut,
 		archived: &[u8],
-	) -> Result<(), RkyvCodecError> {
+	) -> Result<(), RkyvCodecError<L>> {
 		let length_buf = &mut L::Buffer::default();
 		let length_buf = L::encode(archived.len(), length_buf);
 		bytes.put(length_buf);
@@ -103,7 +116,7 @@ mod no_std_feature {
 	pub unsafe fn archive_stream_bytes_unsafe<'b, Packet: Archive, L: LengthCodec>(
 		bytes: &mut Bytes,
 		buffer: &'b mut AlignedVec,
-	) -> Result<&'b Archived<Packet>, RkyvCodecError> {
+	) -> Result<&'b Archived<Packet>, RkyvCodecError<L>> {
 		// Read length
 		let mut length_buf = L::Buffer::default();
 		let length_buf_slice = L::as_slice(&mut length_buf);
@@ -112,7 +125,7 @@ mod no_std_feature {
 
 		// Decode length
 		let (archive_len, remaining) =
-			L::decode(length_buf_slice).map_err(|_| RkyvCodecError::ReadLengthError)?;
+			L::decode(length_buf_slice).map_err(RkyvCodecError::ReadLengthError)?;
 
 		// Read into aligned buffer
 		let begin = length_buf_slice.len() - remaining.len();
@@ -127,7 +140,7 @@ mod no_std_feature {
 	pub fn archive_stream_bytes<'b, Packet: Archive, L: LengthCodec>(
 		bytes: &mut Bytes,
 		buffer: &'b mut AlignedVec,
-	) -> Result<&'b Archived<Packet>, RkyvCodecError>
+	) -> Result<&'b Archived<Packet>, RkyvCodecError<L>>
 	where
 		<Packet as Archive>::Archived: for<'a> CheckBytes<CurrentValidator<'a, rancor::Error>>,
 	{
@@ -139,7 +152,7 @@ mod no_std_feature {
 
 		// Decode length
 		let (archive_len, remaining) =
-			L::decode(length_buf_slice).map_err(|_| RkyvCodecError::ReadLengthError)?;
+			L::decode(length_buf_slice).map_err(RkyvCodecError::ReadLengthError)?;
 
 		// Read into aligned buffer
 		let begin = length_buf_slice.len() - remaining.len();
@@ -161,7 +174,7 @@ mod tests {
 	use async_std::task::block_on;
 	use asynchronous_codec::{CborCodec, Framed};
 	use bytes::BytesMut;
-	use futures::{AsyncRead, AsyncWrite, SinkExt, StreamExt, io::Cursor};
+	use futures::{AsyncBufRead, AsyncRead, AsyncWrite, SinkExt, StreamExt, io::Cursor};
 	use rkyv::{Archive, Archived, Deserialize, Serialize, rancor, to_bytes, util::AlignedVec};
 
 	use crate::{
@@ -213,7 +226,10 @@ mod tests {
 		}
 	}
 	#[inline]
-	async fn consume_amount<R: AsyncRead + Unpin, L: LengthCodec>(mut reader: R, count: usize) {
+	async fn consume_amount<R: AsyncRead + AsyncBufRead + Unpin, L: LengthCodec>(
+		mut reader: R,
+		count: usize,
+	) {
 		let mut buffer = AlignedVec::new();
 		for _ in 0..count {
 			let value = archive_stream::<_, Test, L>(&mut reader, &mut buffer)
@@ -258,6 +274,47 @@ mod tests {
 		let value_sent: Test = rkyv::deserialize::<_, rancor::Error>(data).unwrap();
 
 		assert_eq!(*TEST, value_sent);
+	}
+
+	#[cfg(feature = "varint")]
+	#[async_std::test]
+	/// Tests the edgecase where we hit EOF while reading the length because the whole structure fits within the 10 byte max varint length.
+	async fn functions_varint_edge_case() {
+		#[derive(Archive, Serialize, Deserialize, Debug, PartialEq, Clone)]
+		#[rkyv(compare(PartialEq), attr(derive(Debug)))]
+		struct SmallTest {
+			int: u8,
+		}
+		const SMALL_TEST: SmallTest = SmallTest { int: 1 };
+		let mut writer = Vec::new();
+		let mut sink = RkyvWriter::<_, TestLengthCodec>::new(&mut writer);
+		for _ in 0..2 {
+			sink.send(&SMALL_TEST).await.unwrap();
+		}
+
+		let mut reader = &writer[..];
+		println!("reader: {reader:?}");
+
+		let mut buffer = AlignedVec::with_capacity(256);
+		let data: &Archived<SmallTest> =
+			archive_stream::<_, SmallTest, crate::VarintLength>(&mut reader, &mut buffer)
+				.await
+				.unwrap();
+
+		let value_sent: SmallTest = rkyv::deserialize::<_, rancor::Error>(data).unwrap();
+
+		assert_eq!(SMALL_TEST, value_sent);
+
+		println!("reader: {reader:?}");
+
+		let data: &Archived<SmallTest> =
+			archive_stream::<_, SmallTest, crate::VarintLength>(&mut reader, &mut buffer)
+				.await
+				.unwrap();
+
+		let value_sent: SmallTest = rkyv::deserialize::<_, rancor::Error>(data).unwrap();
+
+		assert_eq!(SMALL_TEST, value_sent);
 	}
 
 	#[async_std::test]
