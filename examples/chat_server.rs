@@ -9,15 +9,14 @@ use async_std::{
 };
 use futures::{prelude::*, SinkExt, StreamExt};
 
-use rkyv::{AlignedVec, Archive, Deserialize, Infallible, Serialize};
+use rkyv::{rancor, util::AlignedVec, Archive, Deserialize, Serialize};
 
 use rkyv_codec::{archive_stream, RkyvWriter, VarintLength};
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
 // This will generate a PartialEq impl between our unarchived and archived types
 // To use the safe API, you have to enable the check_bytes option for the archive
-#[archive(compare(PartialEq), check_bytes)]
-#[archive_attr(derive(Debug))]
+#[rkyv(compare(PartialEq), attr(derive(Debug)))]
 struct ChatMessage {
 	sender: Option<String>,
 	message: String,
@@ -48,7 +47,7 @@ async fn handle_conn(
 			// Read incoming messages
 			archive = archive_stream::<_, ChatMessage, VarintLength>(&mut reader, &mut buffer).fuse() => match archive {
 				Ok(archive) => {
-					let mut msg: ChatMessage = archive.deserialize(&mut Infallible)?;
+					let mut msg: ChatMessage = rkyv::deserialize::<ChatMessage, rancor::Error>(archive).unwrap();
 					msg.sender = Some(format!("{addr}"));
 					println!("[{addr}] sent {msg:?}");
 					outgoing.broadcast(msg).await?;
@@ -88,7 +87,8 @@ async fn main() -> io::Result<()> {
 				let outgoing = broadcast_sender.clone(); // clone the channels
 				let incoming = broadcast_receiver.clone();
 
-				task::spawn(async move { // spawn a greenthread to handle the connection
+				task::spawn(async move {
+					// spawn a greenthread to handle the connection
 					let addr = stream.peer_addr().unwrap();
 					if let Err(err) = handle_conn(stream, outgoing, incoming, &addr).await {
 						println!("[{addr}] error: {err}")

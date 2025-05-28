@@ -1,6 +1,5 @@
 use futures::{ready, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Sink};
 use std::{
-	borrow::BorrowMut,
 	ops::Range,
 	pin::Pin,
 	task::{Context, Poll},
@@ -9,15 +8,18 @@ use std::{
 use pin_project::pin_project;
 
 use rkyv::{
+	api::{
+		high::{HighSerializer, HighValidator},
+		serialize_using,
+	},
+	rancor,
 	ser::{
-		serializers::{
-			AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
-			SharedSerializeMap,
-		},
+		allocator::{Arena, ArenaHandle},
+		sharing::Share,
 		Serializer,
 	},
-	validation::validators::DefaultValidator,
-	AlignedVec, Archive, Archived, Serialize,
+	util::AlignedVec,
+	Archive, Archived, Portable, Serialize,
 };
 
 use crate::{length_codec::LengthCodec, RkyvCodecError};
@@ -45,7 +47,7 @@ pub async fn archive_sink<'b, Inner: AsyncWrite + Unpin, L: LengthCodec>(
 pub async unsafe fn archive_stream_unsafe<
 	'b,
 	Inner: AsyncRead + Unpin,
-	Packet: Archive + 'b,
+	Packet: Archive + Portable + 'b,
 	L: LengthCodec,
 >(
 	inner: &mut Inner,
@@ -76,7 +78,7 @@ pub async unsafe fn archive_stream_unsafe<
 	inner.read_exact(&mut buffer[unused.len()..]).await?;
 
 	// Safety: Caller should make sure that reader does not produce invalid packets.
-	unsafe { Ok(rkyv::archived_root::<Packet>(buffer)) }
+	unsafe { Ok(rkyv::access_unchecked(buffer)) }
 }
 
 /// Reads a single `&Archived<Object>` from an `AsyncRead` using the passed buffer.
@@ -96,7 +98,7 @@ pub async fn archive_stream<'b, Inner: AsyncRead + Unpin, Packet, L: LengthCodec
 ) -> Result<&'b Archived<Packet>, RkyvCodecError>
 where
 	Packet: rkyv::Archive + 'b,
-	Packet::Archived: rkyv::CheckBytes<DefaultValidator<'b>>,
+	Packet::Archived: for<'a> rkyv::bytecheck::CheckBytes<HighValidator<'a, rancor::Error>>,
 {
 	buffer.clear();
 
@@ -122,8 +124,7 @@ where
 	// Read into buffer, after any unused length bytes
 	inner.read_exact(&mut buffer[unused.len()..]).await?;
 
-	let archive = rkyv::check_archived_root::<'b, Packet>(buffer)
-		.map_err(|_| RkyvCodecError::CheckArchiveError)?;
+	let archive = rkyv::access::<Packet::Archived, rancor::Error>(buffer)?;
 
 	Ok(archive)
 }
@@ -133,12 +134,12 @@ where
 pub struct RkyvWriter<Writer: AsyncWrite, L: LengthCodec> {
 	#[pin]
 	writer: Writer,
-	buffer: AlignedVec,
 	length_buffer: L::Buffer,
 	len_state: Range<usize>, // How much of the length buffer has been written
 	buf_state: usize, // Whether or not the aligned buf is being written and if so, how much so far
-	scratch: Option<FallbackScratch<HeapScratch<256>, AllocScratch>>,
-	shared: Option<SharedSerializeMap>,
+	buffer: Option<AlignedVec>,
+	arena: Arena,
+	share: Option<Share>,
 }
 
 // Safety: This should be safe because while HeapScratch is not Send (because it contains BufferScratch which contains NonNull), that NonNull is not used in a way that violates Send.
@@ -148,15 +149,12 @@ impl<Writer: AsyncWrite, L: LengthCodec> RkyvWriter<Writer, L> {
 	pub fn new(writer: Writer) -> Self {
 		Self {
 			writer,
-			buffer: AlignedVec::new(),
 			length_buffer: L::Buffer::default(),
 			len_state: Default::default(),
 			buf_state: 0,
-			scratch: Some(FallbackScratch::new(
-				HeapScratch::new(),
-				AllocScratch::default(),
-			)),
-			shared: Some(SharedSerializeMap::new()),
+			buffer: Some(AlignedVec::new()),
+			arena: Arena::new(),
+			share: Some(Share::new()),
 		}
 	}
 	pub fn inner(self) -> Writer {
@@ -164,16 +162,10 @@ impl<Writer: AsyncWrite, L: LengthCodec> RkyvWriter<Writer, L> {
 	}
 }
 
-impl<Writer: AsyncWrite, Packet, L: LengthCodec> Sink<&Packet> for RkyvWriter<Writer, L>
+impl<Writer: AsyncWrite, Packet: std::fmt::Debug, L: LengthCodec> Sink<&Packet>
+	for RkyvWriter<Writer, L>
 where
-	Packet: Archive
-		+ for<'b> Serialize<
-			CompositeSerializer<
-				AlignedSerializer<&'b mut AlignedVec>,
-				FallbackScratch<HeapScratch<256>, AllocScratch>,
-				SharedSerializeMap,
-			>,
-		>,
+	Packet: Archive + for<'b> Serialize<HighSerializer<AlignedVec, ArenaHandle<'b>, rancor::Error>>,
 {
 	type Error = RkyvCodecError;
 
@@ -186,32 +178,41 @@ where
 
 	fn start_send(self: Pin<&mut Self>, item: &Packet) -> Result<(), Self::Error> {
 		let this = self.project();
-		this.buffer.clear();
+		println!("serializing: {:?}", item);
+		let buffer_len = {
+			// Serializer
+			let mut buffer = this.buffer.take().unwrap();
+			buffer.clear();
+			let share = this.share.take().unwrap();
+			let mut serializer = Serializer::new(buffer, this.arena.acquire(), share);
+			// serialize
+			let _ = serialize_using(item, &mut serializer)?;
 
-		// Construct Serializer
-		let mut serializer = CompositeSerializer::new(
-			AlignedSerializer::new(this.buffer.borrow_mut()),
-			this.scratch.take().unwrap(),
-			this.shared.take().unwrap(),
-		);
+			let (buffer, _, share) = serializer.into_raw_parts();
+			println!("buffer: {buffer:?}");
+			let buffer_len = buffer.len();
+			*this.buffer = Some(buffer);
+			*this.share = Some(share);
+			println!(
+				"this buffer: {:?}, this share: {:?}",
+				this.buffer, this.share
+			);
+			buffer_len
+		};
 
-		serializer
-			.serialize_value(item)
-			.map_err(|_| RkyvCodecError::SerializeError)?;
-
-		// Deconstruct composite serializer
-		let (_, scratch, shared) = serializer.into_components();
-		*this.scratch = Some(scratch);
-		*this.shared = Some(shared);
-
-		*this.len_state = 0..L::encode(this.buffer.len(), this.length_buffer).len();
+		*this.len_state = 0..L::encode(buffer_len, this.length_buffer).len();
 		*this.buf_state = 0;
+		println!("buffer: {:?}", this.buffer);
+		println!("buf_state: {:?}", this.buf_state);
+		println!("len_state: {:?}", this.len_state);
+
 		Ok(())
 	}
 
 	fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		let mut this = self.project();
 
+		// keep writing length buffer for as long as is required
 		let len_state = this.len_state;
 		if len_state.start <= len_state.end {
 			let length_buffer = L::as_slice(this.length_buffer);
@@ -220,15 +221,18 @@ where
 			let written = ready!(Pin::new(&mut this.writer).poll_write(cx, length_buffer)?);
 			len_state.start += written;
 		}
+		let buffer = this.buffer.take().unwrap();
 
-		while *this.buf_state < this.buffer.len() {
-			let buffer_left = &this.buffer[*this.buf_state..this.buffer.len()];
+		while *this.buf_state < buffer.len() {
+			let buffer_left = &buffer[*this.buf_state..buffer.len()];
 			let bytes_written = ready!(Pin::new(&mut this.writer).poll_write(cx, buffer_left))?;
 			if bytes_written == 0 {
 				return Poll::Ready(Err(RkyvCodecError::EOFError));
 			}
 			*this.buf_state += bytes_written;
 		}
+
+		*this.buffer = Some(buffer);
 
 		ready!(this.writer.poll_flush(cx)?);
 		Poll::Ready(Ok(()))

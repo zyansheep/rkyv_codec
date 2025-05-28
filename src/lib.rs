@@ -3,13 +3,12 @@
 
 //! Simple usage example:
 //! ```rust
-//! # use rkyv::{Infallible, Archived, AlignedVec, Archive, Serialize, Deserialize};
+//! # use rkyv::{Archived, util::AlignedVec, Archive, Serialize, Deserialize, rancor};
 //! # use rkyv_codec::{archive_stream, RkyvWriter, VarintLength};
 //! # use futures::SinkExt;
 //! # async_std::task::block_on(async {
 //! #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
-//! #[archive(check_bytes)] // check_bytes is required
-//! #[archive_attr(derive(Debug))]
+//! #[rkyv(attr(derive(Debug)))]
 //! struct Test {
 //!     int: u8,
 //!     string: String,
@@ -30,7 +29,7 @@
 //! let mut reader = &codec.inner()[..];
 //! let mut buffer = AlignedVec::new(); // Aligned streaming buffer for re-use
 //! let data: &Archived<Test> = archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer).await.unwrap(); // This returns a reference into the passed buffer
-//! let value_received: Test = data.deserialize(&mut Infallible).unwrap();
+//! let value_received: Test = rkyv::deserialize::<_, rancor::Error>(data).unwrap();
 //!
 //! assert_eq!(value, value_received);
 //! # })
@@ -51,8 +50,8 @@ use thiserror::Error;
 pub enum RkyvCodecError {
 	#[error(transparent)]
 	IoError(#[from] futures::io::Error),
-	#[error("Packet not correctly archived")]
-	CheckArchiveError,
+	#[error("Packet not correctly archived: {0}")]
+	CheckArchiveError(#[from] rkyv::rancor::Error),
 
 	#[error("Failed to Serialize")]
 	SerializeError,
@@ -80,7 +79,10 @@ pub use crate::rkyv_codec::*;
 
 mod no_std_feature {
 	use bytes::{Buf, BufMut, Bytes, BytesMut};
-	use rkyv::{AlignedVec, Archive, Archived};
+	use rkyv::{
+		api::high::HighValidator, bytecheck::CheckBytes, rancor, util::AlignedVec, Archive,
+		Archived,
+	};
 
 	use crate::{length_codec::LengthCodec, RkyvCodecError};
 
@@ -118,18 +120,17 @@ mod no_std_feature {
 		buffer.extend_from_slice(&bytes[begin..end]);
 		bytes.advance(end);
 
-		let archive = rkyv::archived_root::<Packet>(buffer);
+		let archive = rkyv::access_unchecked::<Packet::Archived>(buffer);
 		Ok(archive)
 	}
 	/// Reads a single `&Archived<Object>` from a `bytes::Bytes` into the passed buffer if
 	/// validation enabled.
-	pub fn archive_stream_bytes<'b, Packet, L: LengthCodec>(
+	pub fn archive_stream_bytes<'b, Packet: Archive, L: LengthCodec>(
 		bytes: &mut Bytes,
 		buffer: &'b mut AlignedVec,
 	) -> Result<&'b Archived<Packet>, RkyvCodecError>
 	where
-		Packet: rkyv::Archive,
-		Packet::Archived: rkyv::CheckBytes<rkyv::validation::validators::DefaultValidator<'b>> + 'b,
+		<Packet as Archive>::Archived: for<'a> CheckBytes<HighValidator<'a, rancor::Error>>,
 	{
 		// Read length
 		let mut length_buf = L::Buffer::default();
@@ -147,8 +148,7 @@ mod no_std_feature {
 		buffer.extend_from_slice(&bytes[begin..end]);
 		bytes.advance(end);
 
-		let archive = rkyv::check_archived_root::<'b, Packet>(buffer)
-			.map_err(|_| RkyvCodecError::CheckArchiveError)?;
+		let archive = rkyv::access(buffer)?;
 		Ok(archive)
 	}
 }
@@ -163,7 +163,7 @@ mod tests {
 	use bytes::BytesMut;
 	use futures::{io::Cursor, AsyncRead, AsyncWrite, SinkExt, StreamExt, TryStreamExt};
 	use futures_codec::{CborCodec, Framed};
-	use rkyv::{to_bytes, AlignedVec, Archive, Archived, Deserialize, Infallible, Serialize};
+	use rkyv::{rancor, to_bytes, util::AlignedVec, Archive, Archived, Deserialize, Serialize};
 
 	use crate::{
 		archive_sink, archive_sink_bytes, archive_stream, archive_stream_bytes,
@@ -184,8 +184,7 @@ mod tests {
 	)]
 	// This will generate a PartialEq impl between our unarchived and archived types
 	// To use the safe API, you have to use the check_bytes option for the archive
-	#[archive(compare(PartialEq), check_bytes)]
-	#[archive_attr(derive(Debug))]
+	#[rkyv(compare(PartialEq), attr(derive(Debug)))]
 	struct Test {
 		int: u8,
 		string: String,
@@ -199,10 +198,10 @@ mod tests {
 			option: Some(vec![1, 2, 3, 4]),
 		};
 		static ref TEST_BYTES: &'static [u8] = {
-			let vec = rkyv::to_bytes::<_, 256>(&*TEST).unwrap();
+			let vec = rkyv::to_bytes::<rancor::Error>(&*TEST).unwrap();
 			Box::leak(vec.into_boxed_slice())
 		};
-		static ref TEST_ARCHIVED: &'static Archived<Test> = unsafe { rkyv::archived_root::<Test>(*TEST_BYTES) };
+		static ref TEST_ARCHIVED: &'static Archived<Test> = unsafe { rkyv::access_unchecked::<Archived<Test>>(*TEST_BYTES) };
 	}
 
 	#[inline]
@@ -247,6 +246,7 @@ mod tests {
 			.unwrap();
 
 		let mut reader = &writer[..];
+		println!("archive_sink bytes: {:?}", reader);
 
 		let mut buffer = AlignedVec::with_capacity(256);
 		let data: &Archived<Test> =
@@ -254,7 +254,7 @@ mod tests {
 				.await
 				.unwrap();
 
-		let value_sent: Test = data.deserialize(&mut Infallible).unwrap();
+		let value_sent: Test = rkyv::deserialize::<_, rancor::Error>(data).unwrap();
 
 		assert_eq!(*TEST, value_sent);
 	}
@@ -266,6 +266,8 @@ mod tests {
 		sink.send(&*TEST).await.unwrap();
 
 		let mut reader = &writer[..];
+		println!("archived: {:?}", *TEST_BYTES);
+		println!("reader: {reader:?}");
 
 		let mut buffer = AlignedVec::with_capacity(256);
 		let data: &Archived<Test> =
@@ -355,7 +357,7 @@ mod tests {
 				buffer.clear();
 
 				for _ in 0..50 {
-					let bytes = to_bytes::<_, 256>(&*TEST).unwrap(); // This makes it very slow
+					let bytes = to_bytes::<rancor::Error>(&*TEST).unwrap(); // This makes it very slow
 					archive_sink::<_, VarintLength>(&mut buffer, &bytes)
 						.await
 						.unwrap();

@@ -3,17 +3,16 @@ use std::{fmt, io::Write};
 use async_std::{io, net::TcpStream};
 use futures::{FutureExt, SinkExt};
 
-use rkyv::{AlignedVec, Archive, Deserialize, Infallible, Serialize};
+use rkyv::{rancor, util::AlignedVec, Archive, Deserialize, Serialize};
 
 use rkyv_codec::{archive_stream, RkyvWriter, VarintLength};
 
-use rustyline_async::{Readline, ReadlineError};
+use rustyline_async::{Readline, ReadlineEvent};
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
 // This will generate a PartialEq impl between our unarchived and archived types
 // To use the safe API, you must use the check_bytes option for the archive
-#[archive(compare(PartialEq), check_bytes)]
-#[archive_attr(derive(Debug))]
+#[rkyv(compare(PartialEq), attr(derive(Debug)))]
 struct ChatMessage {
 	sender: Option<String>,
 	message: String,
@@ -47,7 +46,7 @@ async fn main() -> io::Result<()> {
 		futures::select! {
 			archive = archive_stream::<_, ChatMessage, VarintLength>(&mut tcp_stream, &mut buffer).fuse() => match archive {
 				Ok(archive) => {
-					let message: ChatMessage = archive.deserialize(&mut Infallible).unwrap();
+					let message: ChatMessage = rkyv::deserialize::<_, rancor::Error>(archive).unwrap();
 					writeln!(writer, "{message}")?;
 				}
 				Err(err) => {
@@ -56,17 +55,17 @@ async fn main() -> io::Result<()> {
 				}
 			},
 			line = rl.readline().fuse() => match line {
-				Ok(line) => {
+				Ok(ReadlineEvent::Line(line)) => {
 					let message = ChatMessage {
 						sender: None,
 						message: line,
 					};
 					packet_sender.send(&message).await.unwrap();
 				}
-				Err(ReadlineError::Interrupted) => {
+				Ok(ReadlineEvent::Interrupted) => {
 					writeln!(writer, "CTRL-C, do CTRL-D to exit")?;
 				},
-				Err(ReadlineError::Eof) => {
+				Ok(ReadlineEvent::Eof) => {
 					writeln!(writer, "CTRL-D")?;
 					break
 				},
