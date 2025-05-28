@@ -25,9 +25,14 @@ To run:
 
 Simple usage example:
 ```rust
+Simple usage example:
+```rust
+use rkyv::{Archived, util::AlignedVec, Archive, Serialize, Deserialize, rancor};
+use rkyv_codec::{archive_stream, RkyvWriter, VarintLength};
+use futures::SinkExt;
+async_std::task::block_on(async {
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
-#[archive(check_bytes)] // check_bytes is required
-#[archive_attr(derive(Debug))]
+#[rkyv(attr(derive(Debug)))]
 struct Test {
     int: u8,
     string: String,
@@ -46,8 +51,9 @@ codec.send(&value).await.unwrap();
 let mut reader = &codec.inner()[..];
 let mut buffer = AlignedVec::new(); // Aligned streaming buffer for re-use
 let data: &Archived<Test> = archive_stream::<_, Test, VarintLength>(&mut reader, &mut buffer).await.unwrap(); // This returns a reference into the passed buffer
-let value_received: Test = data.deserialize(&mut Infallible).unwrap();
+let value_received: Test = rkyv::deserialize::<_, rancor::Error>(data).unwrap();
 assert_eq!(value, value_received);
+# })
 ```
 
 See [`examples/no-std`](examples/no-std/src/main.rs) for an example with no-std support.
