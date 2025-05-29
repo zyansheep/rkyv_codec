@@ -1,5 +1,3 @@
-//! This file implements a "Framed" Encoder/Decoder via `asynchronous_codec`
-
 use std::marker::PhantomData;
 
 use asynchronous_codec::{BytesMut, Decoder, Encoder};
@@ -21,6 +19,43 @@ use rkyv::{
 };
 
 use crate::{RkyvCodecError, length_codec::LengthCodec};
+
+/// A futures-compatible Codec using the `asynchronous-codec` library.
+///
+/// This struct is used to encode and decode rkyv packets.
+/// # Example
+///
+/// ```rust
+/// # use rkyv::{Archive, Serialize, Deserialize, rancor, util::AlignedVec};
+/// # use rkyv_codec::{RkyvCodec, VarintLength};
+/// # use asynchronous_codec::{Framed, Decoder, Encoder};
+/// # use bytes::BytesMut;
+/// #
+/// #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
+/// #[rkyv(attr(derive(Debug)))]
+/// struct Test {
+///     int: u8,
+///     string: String,
+///     option: Option<Vec<i32>>,
+/// }
+///
+/// let value = Test {
+///     int: 42,
+///     string: "hello world".to_string(),
+///     option: Some(vec![1, 2, 3, 4]),
+/// };
+///
+/// let mut codec = RkyvCodec::<Test, VarintLength>::default();
+/// let mut buf = BytesMut::new();
+///
+/// // Encoding
+/// codec.encode(value.clone(), &mut buf).unwrap();
+///
+/// // Decoding
+/// let decoded_value = codec.decode(&mut buf).unwrap().unwrap();
+///
+/// assert_eq!(value, decoded_value);
+/// ```
 
 pub struct RkyvCodec<Packet: Archive, L: LengthCodec> {
 	_data: PhantomData<Packet>,

@@ -1,6 +1,6 @@
 [package]
 name = "rkyv_codec"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Some adaptors to stream rkyv Archives over AsyncRead and AsyncWrite"
@@ -24,20 +24,20 @@ thiserror = { version = "1.0", package = "thiserror-core", default-features = fa
 async-std = { version = "1.13.0", features = ["attributes"] }
 # For tests & benchmark comparisons
 asynchronous-codec = { version = "0.7", features = ["cbor"] }
+criterion = { version = "0.6", features = ["async_std"] }
 serde = "^1.0"
 lazy_static = "1.5.0"
+bincode = "^2.0"                                              # For benchmark comparisons
+rand = "^0.9"                                                 # For generating test data
 
-bincode = "^2.0" # For benchmark comparisons
-rand = "^0.9"    # For generating test data
+# For macros
+paste = "1.0"
 
 # For examples
 async-broadcast = "0.7.1"
 rustyline-async = "0.4.0"
 anyhow = "1.0"
-paste = "1.0"
-criterion = { version = "0.6", features = ["async_std"] }
-iai-callgrind = "0.14"
-plotters = "0.3.5"                                        # For generating graphs in benchmarks
+
 
 [features]
 default = ["std"] # enable variable-length length codec
