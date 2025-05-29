@@ -49,7 +49,7 @@ use crate::{RkyvCodecError, length_codec::LengthCodec};
 /// let mut buf = BytesMut::new();
 ///
 /// // Encoding
-/// codec.encode(value.clone(), &mut buf).unwrap();
+/// codec.encode(&value, &mut buf).unwrap();
 ///
 /// // Decoding
 /// let decoded_value = codec.decode(&mut buf).unwrap().unwrap();
@@ -81,11 +81,11 @@ impl<Packet: Archive, L: LengthCodec> Default for RkyvCodec<Packet, L> {
 	}
 }
 /// Encoder impl encodes object streams to bytes
-impl<Packet, L: LengthCodec> Encoder for RkyvCodec<Packet, L>
+impl<Packet: 'static, L: LengthCodec> Encoder for RkyvCodec<Packet, L>
 where
 	Packet: Archive + for<'b> Serialize<HighSerializer<AlignedVec, ArenaHandle<'b>, rancor::Error>>,
 {
-	type Item<'a> = Packet;
+	type Item<'a> = &'a Packet;
 	type Error = RkyvCodecError<L>;
 
 	fn encode<'a>(&mut self, data: Self::Item<'a>, buf: &mut BytesMut) -> Result<(), Self::Error> {
@@ -93,7 +93,7 @@ where
 		let share = self.ser_share.take().unwrap();
 		encode_buffer.clear();
 		let mut serializer = Serializer::new(encode_buffer, self.ser_arena.acquire(), share);
-		let _ = serialize_using(&data, &mut serializer)?;
+		let _ = serialize_using(data, &mut serializer)?;
 
 		let (encode_buffer, _, share) = serializer.into_raw_parts();
 

@@ -330,7 +330,7 @@ mod tests {
 		let codec = crate::framed_codec::RkyvCodec::<Test, TestLengthCodec>::default();
 		let mut buffer = vec![0u8; 256];
 		let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
-		framed.send(TEST.clone()).await.unwrap();
+		framed.send(&*TEST).await.unwrap();
 
 		let codec = framed.into_parts().codec;
 
@@ -449,7 +449,7 @@ mod tests {
 				let codec = crate::framed_codec::RkyvCodec::<Test, TestLengthCodec>::default();
 				let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
 				for _ in 0..50 {
-					framed.send(TEST.clone()).await.unwrap();
+					framed.send(&TEST).await.unwrap();
 				}
 			})
 		});

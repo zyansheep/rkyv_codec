@@ -47,7 +47,7 @@ let mut codec = RkyvCodec::<Test, VarintLength>::default();
 let mut buf = BytesMut::new();
 
 // Encoding
-codec.encode(value.clone(), &mut buf).unwrap();
+codec.encode(&value, &mut buf).unwrap();
 
 // Decoding
 let decoded_value = codec.decode(&mut buf).unwrap().unwrap();
