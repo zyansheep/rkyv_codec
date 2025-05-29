@@ -9,7 +9,7 @@ repository = "https://github.com/zyansheep/rkyv_codec"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-unsigned-varint = { version = "0.8", optional = true, default-features = false }
+unsigned-varint = { version = "0.8", default-features = false }
 rkyv = { version = "0.8", default-features = false, features = [
 	"bytecheck",
 	"alloc",
@@ -40,21 +40,26 @@ iai-callgrind = "0.14"
 plotters = "0.3.5"                                        # For generating graphs in benchmarks
 
 [features]
-default = ["aio", "std", "varint"]
-varint = ["unsigned-varint"]                                          # enable variable-length length codec
-std = ["thiserror/std", "rkyv/std", "futures", "unsigned-varint/std"]
-aio = ["asynchronous-codec", "unsigned-varint/futures"]
+default = ["std"] # enable variable-length length codec
+std = [
+	"thiserror/std",
+	"rkyv/std",
+	"unsigned-varint/std",
+	"asynchronous-codec",
+	"unsigned-varint/futures",
+	"futures",
+]
 
 [workspace]
 members = ["examples/no-std"]
 
 [[example]]
 name = "chat_server"
-required-features = ["std", "varint"]
+required-features = ["std"]
 
 [[example]]
 name = "chat_client"
-required-features = ["std", "varint"]
+required-features = ["std"]
 
 [package.metadata."docs.rs"]
 all-features = true

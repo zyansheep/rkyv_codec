@@ -200,7 +200,10 @@ where
 			let buffer_left = &buffer[*this.buf_state..buffer.len()];
 			let bytes_written = ready!(Pin::new(&mut this.writer).poll_write(cx, buffer_left))?;
 			if bytes_written == 0 {
-				return Poll::Ready(Err(RkyvCodecError::EOFError));
+				return Poll::Ready(Err(RkyvCodecError::LengthTooLong {
+					requested: buffer.capacity(),
+					available: buffer.len(),
+				}));
 			}
 			*this.buf_state += bytes_written;
 		}

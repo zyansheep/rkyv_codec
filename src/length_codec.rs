@@ -24,7 +24,7 @@ pub trait LengthCodec: fmt::Debug + 'static {
 
 	fn decode_bytes(buf: &mut impl Buf) -> Result<usize, Self::Error>;
 
-	#[cfg(feature = "aio")]
+	#[cfg(feature = "std")]
 	#[allow(async_fn_in_trait)]
 	async fn decode_async<'a, W: AsyncRead + Unpin>(
 		reader: &'a mut W,
@@ -52,10 +52,8 @@ impl From<unsigned_varint::decode::Error> for VarintLengthError {
 }
 
 /// Variable-bit length encoding based using unsigned_varint crate, currently can handle lengths up to 2^63
-#[cfg(feature = "varint")]
 #[derive(Debug)]
 pub struct VarintLength;
-#[cfg(feature = "varint")]
 impl LengthCodec for VarintLength {
 	type Error = VarintLengthError;
 	type Buffer = [u8; 10]; // max varint length possible
@@ -74,17 +72,38 @@ impl LengthCodec for VarintLength {
 	fn decode(buf: &[u8]) -> Result<(usize, &[u8]), Self::Error> {
 		Ok(unsigned_varint::decode::usize(buf)?)
 	}
+
 	fn decode_bytes(buf: &mut impl Buf) -> Result<usize, Self::Error> {
-		let len = unsigned_varint::io::read_usize(buf.reader()).map_err(|e| match e {
-			unsigned_varint::io::ReadError::Io(_) => VarintLengthError::Insufficient, // only EOF error should occur here
-			unsigned_varint::io::ReadError::Decode(error) => error.into(),
-			_ => todo!(),
-		})?;
-		// advanced by
-		Ok(len)
+		let mut n = 0; // number to return
+		let mut i = 0; // what byte we are reading
+
+		#[cfg(target_pointer_width = "32")]
+		let max_bytes = 4;
+		#[cfg(target_pointer_width = "64")]
+		let max_bytes = 9;
+
+		let mut buf = buf.take(max_bytes);
+
+		while let Ok(b) = buf.try_get_u8() {
+			let k = usize::from(b & 0x7F); // mask out first byte
+			n |= k << (i * 7); // record that byte
+			if unsigned_varint::decode::is_last(b) {
+				if b == 0 && i > 0 {
+					// If last byte (of a multi-byte varint) is zero, it could have been "more
+					// minimally" encoded by dropping that trailing zero.
+					return Err(VarintLengthError::NotMinimal);
+				}
+				return Ok(n);
+			}
+			if i == max_bytes {
+				return Err(VarintLengthError::Overflow);
+			}
+			i += 1;
+		}
+		Err(VarintLengthError::Insufficient)
 	}
 
-	#[cfg(feature = "aio")]
+	#[cfg(feature = "std")]
 	async fn decode_async<'a, R: AsyncRead + Unpin>(
 		reader: &'a mut R,
 	) -> Result<usize, WithIOError<Self::Error>> {
@@ -152,7 +171,7 @@ macro_rules! impl_uint_length_codec {
 				Self::decode(&buffer).map(|(len, _)| len)
 			}
 
-			#[cfg(feature = "aio")]
+			#[cfg(feature = "std")]
 			async fn decode_async<'a, R: AsyncRead + Unpin>(
 				reader: &'a mut R,
 			) -> Result<usize, WithIOError<Self::Error>> {
@@ -181,6 +200,7 @@ impl_uint_length_codec!(U16Length, u16, 2);
 impl_uint_length_codec!(U32Length, u32, 4);
 impl_uint_length_codec!(U64Length, u64, 8);
 
+#[cfg(feature = "std")]
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -213,7 +233,6 @@ mod tests {
 					assert_eq!(<$codec_type>::decode(&[]), Err(NotEnoughBytesError));
 				}
 
-				#[cfg(feature = "std")]
 				#[async_std::test]
 				async fn [<test_ $test_suffix _decode_async>]() {
 					let data = $encoded_bytes;

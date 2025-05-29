@@ -8,9 +8,12 @@ use criterion::{
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 // rkyv_codec imports
 use rkyv_codec::{
+	LengthCodec,
 	RkyvCodec,      // The one for asynchronous-codec
 	RkyvCodecError, // The error type
-	length_codec::{LengthCodec, U32Length, U64Length, VarintLength},
+	U32Length,
+	U64Length,
+	VarintLength,
 };
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use std::{hint::black_box, time::Duration};
@@ -198,9 +201,9 @@ fn codec_benchmarks(c: &mut Criterion) {
 criterion_group! {
 	name = benches;
 	config = Criterion::default()
-		.measurement_time(Duration::from_secs(10)) // Adjust measurement time
-		.warm_up_time(Duration::from_secs(1))    // Adjust warm-up time
-		.sample_size(100);                        // Adjust sample size
+		.measurement_time(Duration::from_millis(100)) // Adjust measurement time
+		.warm_up_time(Duration::from_millis(100))    // Adjust warm-up time
+		.sample_size(300);                        // Adjust sample size
 	targets = codec_benchmarks
 }
 

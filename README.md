@@ -62,16 +62,16 @@ See [`examples/no-std`](examples/no-std/src/main.rs) for an example with no-std 
 
 These are a set of benchmarks, each benchmark represents 50 test objects being either sent or received. (requires nightly)
 ```
-test tests::bench_archive_sink_50                   ... bench:       6,107.33 ns/iter (+/- 2,870.73)
-test tests::bench_archive_sink_prearchived_50       ... bench:       1,526.06 ns/iter (+/- 129.90)
-test tests::bench_archive_stream_50                 ... bench:       2,212.54 ns/iter (+/- 442.14)
-test tests::bench_futures_cbor_sink_50              ... bench:       8,761.60 ns/iter (+/- 344.94)
-test tests::bench_futures_cbor_stream_50            ... bench:       6,909.96 ns/iter (+/- 1,472.94)
-test tests::bench_rkyv_asynchronous_codec_sink_50   ... bench:       4,335.70 ns/iter (+/- 303.77)
-test tests::bench_rkyv_asynchronous_codec_stream_50 ... bench:       4,265.32 ns/iter (+/- 101.53)
-test tests::bench_rkyv_writer_50                    ... bench:       2,240.37 ns/iter (+/- 142.51)
-test tests::bench_u64_length_encoding               ... bench:       2,475.36 ns/iter (+/- 148.32)
-test tests::bench_varint_length_encoding            ... bench:       4,050.56 ns/iter (+/- 404.42)
+test tests::bench_archive_sink_50                   ... bench:       6,276.07 ns/iter (+/- 250.20)
+test tests::bench_archive_sink_prearchived_50       ... bench:       2,009.84 ns/iter (+/- 175.23)
+test tests::bench_archive_stream_50                 ... bench:       2,110.66 ns/iter (+/- 150.51)
+test tests::bench_futures_cbor_sink_50              ... bench:       8,178.37 ns/iter (+/- 123.13)
+test tests::bench_futures_cbor_stream_50            ... bench:       6,606.01 ns/iter (+/- 129.89)
+test tests::bench_rkyv_asynchronous_codec_sink_50   ... bench:       4,328.91 ns/iter (+/- 415.17)
+test tests::bench_rkyv_asynchronous_codec_stream_50 ... bench:       4,059.72 ns/iter (+/- 243.54)
+test tests::bench_rkyv_writer_50                    ... bench:       2,228.49 ns/iter (+/- 185.92)
+test tests::bench_u64_length_encoding               ... bench:       2,494.63 ns/iter (+/- 143.85)
+test tests::bench_varint_length_encoding            ... bench:       4,036.83 ns/iter (+/- 471.98)
 ```
 The fastest real benchmark (full serialization and bytecheck) is using `RkyvWriter` for writing and `archive_stream` for reading.
 This is compared to the slowest benchmark: the `asynchronous-codec` library's `CborCodec`.

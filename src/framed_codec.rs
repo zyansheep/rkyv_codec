@@ -1,3 +1,5 @@
+//! This file implements a "Framed" Encoder/Decoder via `asynchronous_codec`
+
 use std::marker::PhantomData;
 
 use asynchronous_codec::{BytesMut, Decoder, Encoder};

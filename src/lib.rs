@@ -41,21 +41,18 @@
 )]
 
 /// Abstract length encodings for reading and writing streams
-pub mod length_codec;
-
-#[cfg(feature = "varint")]
-pub use length_codec::VarintLength;
-
-#[cfg(feature = "aio")]
-mod aio;
-#[cfg(feature = "aio")]
-pub use aio::*;
-
-#[cfg(feature = "std")]
-use length_codec::LengthCodec;
+mod length_codec;
+pub use length_codec::LengthCodec;
+pub use length_codec::{U8Length, U16Length, U32Length, U64Length, VarintLength};
 
 #[cfg(feature = "std")]
 use length_codec::WithIOError;
+
+// Asynchronous IO (framed read/writing)
+#[cfg(feature = "std")]
+mod framed_codec;
+#[cfg(feature = "std")]
+pub use framed_codec::*;
 
 /// Error type for rkyv_codec
 use thiserror::Error;
@@ -68,8 +65,8 @@ pub enum RkyvCodecError<L: LengthCodec> {
 	CheckArchiveError(#[from] rkyv::rancor::Error),
 	#[error("Failed to parse length: {0}")]
 	ReadLengthError(L::Error),
-	#[error("Premature End of File Error")]
-	EOFError,
+	#[error("Premature End of Buffer Error")]
+	LengthTooLong { requested: usize, available: usize },
 }
 
 #[cfg(feature = "std")]
@@ -120,8 +117,16 @@ pub unsafe fn archive_stream_bytes_unsafe<'b, Packet: Archive, L: LengthCodec>(
 	// Read length
 	let archive_len = L::decode_bytes(bytes).map_err(RkyvCodecError::ReadLengthError)?;
 
+	// reserve length
+	buffer.reserve_exact(archive_len.saturating_sub(buffer.len()));
+
+	// Safety: we assume that copy_to_slice will only write (not read) and thus even if buffer is uninit, this should be fine.
+	unsafe {
+		buffer.set_len(archive_len);
+	}
+
 	// Read specific amount into aligned buffer
-	buffer.extend_from_reader(&mut bytes.take(archive_len).reader())?;
+	bytes.copy_to_slice(&mut buffer[..archive_len]);
 
 	// reinterpret cast
 	let archive = unsafe { rkyv::access_unchecked::<Packet::Archived>(buffer) };
@@ -138,8 +143,21 @@ where
 	// Read length
 	let archive_len = L::decode_bytes(bytes).map_err(RkyvCodecError::ReadLengthError)?;
 
+	// reserve length
+	buffer.reserve_exact(archive_len.saturating_sub(buffer.len()));
+
+	// Safety: we assume that copy_to_slice will only write (not read) and thus even if buffer is uninit, this should be fine.
+	unsafe {
+		buffer.set_len(archive_len);
+	}
+
 	// Read specific amount into aligned buffer
-	buffer.extend_from_reader(&mut bytes.take(archive_len).reader())?;
+	bytes
+		.try_copy_to_slice(buffer.as_mut_slice())
+		.map_err(|e| RkyvCodecError::LengthTooLong {
+			requested: e.requested,
+			available: e.available,
+		})?;
 
 	let archive = cur_api::access::<Archived<Packet>, rancor::Error>(&*buffer)?;
 	Ok(archive)
@@ -156,15 +174,13 @@ mod tests {
 	use futures::{AsyncBufRead, AsyncRead, AsyncWrite, SinkExt, StreamExt, io::Cursor};
 	use rkyv::{Archive, Archived, Deserialize, Serialize, rancor, to_bytes, util::AlignedVec};
 
+	use crate::archive_stream;
 	use crate::{
-		RkyvWriter, archive_sink, archive_sink_bytes, archive_stream, archive_stream_bytes,
-		length_codec::{self, LengthCodec, U64Length},
+		RkyvWriter, archive_sink, archive_sink_bytes, archive_stream_bytes,
+		length_codec::{self, LengthCodec, U64Length, VarintLength},
 	};
 
-	#[cfg(feature = "varint")]
 	type TestLengthCodec = length_codec::VarintLength;
-	#[cfg(not(feature = "varint"))]
-	type TestLengthCodec = length_codec::U32Length;
 
 	#[derive(
 		Archive,
@@ -255,7 +271,6 @@ mod tests {
 		assert_eq!(*TEST, value_sent);
 	}
 
-	#[cfg(feature = "varint")]
 	#[async_std::test]
 	/// Tests the edgecase where we hit EOF while reading the length because the whole structure fits within the 10 byte max varint length.
 	async fn functions_varint_edge_case() {
@@ -276,7 +291,7 @@ mod tests {
 
 		let mut buffer = AlignedVec::with_capacity(256);
 		let data: &Archived<SmallTest> =
-			archive_stream::<_, SmallTest, crate::VarintLength>(&mut reader, &mut buffer)
+			archive_stream::<_, SmallTest, VarintLength>(&mut reader, &mut buffer)
 				.await
 				.unwrap();
 
@@ -287,7 +302,7 @@ mod tests {
 		println!("reader: {reader:?}");
 
 		let data: &Archived<SmallTest> =
-			archive_stream::<_, SmallTest, crate::VarintLength>(&mut reader, &mut buffer)
+			archive_stream::<_, SmallTest, VarintLength>(&mut reader, &mut buffer)
 				.await
 				.unwrap();
 
@@ -314,9 +329,9 @@ mod tests {
 	}
 
 	#[async_std::test]
-	#[cfg(feature = "aio")]
+
 	async fn futures_ser_de() {
-		let codec = crate::aio::RkyvCodec::<Test, TestLengthCodec>::default();
+		let codec = crate::framed_codec::RkyvCodec::<Test, TestLengthCodec>::default();
 		let mut buffer = vec![0u8; 256];
 		let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
 		framed.send(TEST.clone()).await.unwrap();
@@ -347,15 +362,14 @@ mod tests {
 
 	use test::Bencher;
 
-	#[cfg(feature = "varint")]
 	#[bench]
 	fn bench_varint_length_encoding(b: &mut Bencher) {
 		let mut buffer = Vec::with_capacity(1024);
 		b.iter(|| {
 			block_on(async {
 				buffer.clear();
-				gen_amount::<_, crate::VarintLength>(&mut buffer, 50).await;
-				consume_amount::<_, crate::VarintLength>(&mut &buffer[..], 50).await;
+				gen_amount::<_, VarintLength>(&mut buffer, 50).await;
+				consume_amount::<_, VarintLength>(&mut &buffer[..], 50).await;
 			})
 		})
 	}
@@ -430,14 +444,13 @@ mod tests {
 		});
 	}
 
-	#[cfg(feature = "aio")]
 	#[bench]
 	fn bench_rkyv_asynchronous_codec_sink_50(b: &mut Bencher) {
 		let mut buffer = Vec::with_capacity(1024);
 		b.iter(|| {
 			block_on(async {
 				buffer.clear();
-				let codec = crate::aio::RkyvCodec::<Test, TestLengthCodec>::default();
+				let codec = crate::framed_codec::RkyvCodec::<Test, TestLengthCodec>::default();
 				let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
 				for _ in 0..50 {
 					framed.send(TEST.clone()).await.unwrap();
@@ -446,7 +459,7 @@ mod tests {
 		});
 		block_on(consume_amount::<_, TestLengthCodec>(&mut &buffer[..], 50));
 	}
-	#[cfg(feature = "aio")]
+
 	#[bench]
 	fn bench_rkyv_asynchronous_codec_stream_50(b: &mut Bencher) {
 		use futures::TryStreamExt;
@@ -454,7 +467,7 @@ mod tests {
 
 		block_on(gen_amount::<_, TestLengthCodec>(&mut buffer, 50));
 
-		let codec = crate::aio::RkyvCodec::<Test, TestLengthCodec>::default();
+		let codec = crate::framed_codec::RkyvCodec::<Test, TestLengthCodec>::default();
 		let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
 		b.iter(|| {
 			block_on(async {
