@@ -170,7 +170,7 @@ mod tests {
 	use async_std::task::block_on;
 	use asynchronous_codec::{CborCodec, Framed};
 	use bytes::BytesMut;
-	use futures::{AsyncBufRead, AsyncRead, AsyncWrite, SinkExt, StreamExt, io::Cursor};
+	use futures::{AsyncRead, AsyncWrite, SinkExt, StreamExt, io::Cursor};
 	use rkyv::{Archive, Archived, Deserialize, Serialize, rancor, to_bytes, util::AlignedVec};
 
 	use crate::archive_stream;
@@ -220,10 +220,7 @@ mod tests {
 		}
 	}
 	#[inline]
-	async fn consume_amount<R: AsyncRead + AsyncBufRead + Unpin, L: LengthCodec>(
-		mut reader: R,
-		count: usize,
-	) {
+	async fn consume_amount<R: AsyncRead + Unpin, L: LengthCodec>(mut reader: R, count: usize) {
 		let mut buffer = AlignedVec::new();
 		for _ in 0..count {
 			let value = archive_stream::<_, Test, L>(&mut reader, &mut buffer)

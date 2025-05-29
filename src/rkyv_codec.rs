@@ -1,4 +1,4 @@
-use futures::{AsyncBufRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Sink, ready};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Sink, ready};
 use std::{
 	ops::Range,
 	pin::Pin,
@@ -46,7 +46,7 @@ pub async fn archive_sink<'b, Inner: AsyncWrite + Unpin, L: LengthCodec>(
 /// Will return an error if there are not enough bytes to read to read the length of the packet, or read the packet itself. Will also return an error if the length encoding format is invalid.
 pub async unsafe fn archive_stream_unsafe<
 	'b,
-	Inner: AsyncBufRead + Unpin,
+	Inner: AsyncRead + Unpin,
 	Packet: Archive + Portable + 'b,
 	L: LengthCodec,
 >(
@@ -84,7 +84,7 @@ pub async unsafe fn archive_stream_unsafe<
 /// Passed buffer is reallocated so it may fit the size of the packet being written. This may allow for DOS attacks if remote sends too large a length encoding
 /// # Errors
 /// Will return an error if there are not enough bytes to read to read the length of the packet, or read the packet itself. Will also return an error if the length encoding format is invalid or the packet archive itself is invalid.
-pub async fn archive_stream<'b, Inner: AsyncBufRead + Unpin, Packet, L: LengthCodec>(
+pub async fn archive_stream<'b, Inner: AsyncRead + Unpin, Packet, L: LengthCodec>(
 	inner: &mut Inner,
 	buffer: &'b mut AlignedVec,
 ) -> Result<&'b Archived<Packet>, RkyvCodecError<L>>
