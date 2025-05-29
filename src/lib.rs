@@ -46,9 +46,12 @@ pub mod length_codec;
 #[cfg(feature = "varint")]
 pub use length_codec::VarintLength;
 
-#[cfg(feature = "futures_stream")]
-mod futures_stream;
+#[cfg(feature = "aio")]
+mod aio;
+#[cfg(feature = "aio")]
+pub use aio::*;
 
+#[cfg(feature = "std")]
 use length_codec::LengthCodec;
 
 #[cfg(feature = "std")]
@@ -82,89 +85,65 @@ impl<L: LengthCodec> From<WithIOError<L::Error>> for RkyvCodecError<L> {
 #[cfg(feature = "std")]
 mod rkyv_codec;
 #[cfg(feature = "std")]
-pub use crate::rkyv_codec::*;
+pub use rkyv_codec::*;
 
-mod no_std_feature {
-	use bytes::{Buf, BufMut, Bytes, BytesMut};
-	#[cfg(feature = "std")]
-	use rkyv::api::high as cur_api;
-	#[cfg(feature = "std")]
-	use rkyv::api::high::HighValidator as CurrentValidator;
-	#[cfg(not(feature = "std"))]
-	use rkyv::api::low as cur_api;
-	#[cfg(not(feature = "std"))]
-	use rkyv::api::low::LowValidator as CurrentValidator;
+use bytes::{Buf, BufMut};
+#[cfg(feature = "std")]
+use rkyv::api::high as cur_api;
+#[cfg(feature = "std")]
+use rkyv::api::high::HighValidator as CurrentValidator;
+#[cfg(not(feature = "std"))]
+use rkyv::api::low as cur_api;
+#[cfg(not(feature = "std"))]
+use rkyv::api::low::LowValidator as CurrentValidator;
 
-	use rkyv::{Archive, Archived, bytecheck::CheckBytes, rancor, util::AlignedVec};
+use rkyv::{Archive, Archived, bytecheck::CheckBytes, rancor, util::AlignedVec};
 
-	use crate::{RkyvCodecError, length_codec::LengthCodec};
-
-	/// Writes a single `Object` from a `bytes::Bytes`
-	pub fn archive_sink_bytes<Packet: Archive, L: LengthCodec>(
-		bytes: &mut BytesMut,
-		archived: &[u8],
-	) -> Result<(), RkyvCodecError<L>> {
-		let length_buf = &mut L::Buffer::default();
-		let length_buf = L::encode(archived.len(), length_buf);
-		bytes.put(length_buf);
-		bytes.put(archived);
-		Ok(())
-	}
-	/// Reads a single `&Archived<Object>` from a `bytes::Bytes` into the passed buffer
-	/// # Safety
-	/// This will cause undefined behavior if the bytestream is not the correct format (i.e. not generated through `archive_sink[_bytes]`, `RkyvWriter`, or `RkyvCodec`) with the correct LengthCodec
-	pub unsafe fn archive_stream_bytes_unsafe<'b, Packet: Archive, L: LengthCodec>(
-		bytes: &mut Bytes,
-		buffer: &'b mut AlignedVec,
-	) -> Result<&'b Archived<Packet>, RkyvCodecError<L>> {
-		// Read length
-		let mut length_buf = L::Buffer::default();
-		let length_buf_slice = L::as_slice(&mut length_buf);
-		let copy_len = usize::min(length_buf_slice.len(), bytes.len());
-		length_buf_slice[..copy_len].copy_from_slice(&bytes[..copy_len]);
-
-		// Decode length
-		let (archive_len, remaining) =
-			L::decode(length_buf_slice).map_err(RkyvCodecError::ReadLengthError)?;
-
-		// Read into aligned buffer
-		let begin = length_buf_slice.len() - remaining.len();
-		let end = begin + archive_len;
-		buffer.extend_from_slice(&bytes[begin..end]);
-		bytes.advance(end);
-
-		let archive = unsafe { rkyv::access_unchecked::<Packet::Archived>(buffer) };
-		Ok(archive)
-	}
-	/// Reads a single `&Archived<Object>` from a `bytes::Bytes` into the passed buffer if validation enabled.
-	pub fn archive_stream_bytes<'b, Packet: Archive, L: LengthCodec>(
-		bytes: &mut Bytes,
-		buffer: &'b mut AlignedVec,
-	) -> Result<&'b Archived<Packet>, RkyvCodecError<L>>
-	where
-		<Packet as Archive>::Archived: for<'a> CheckBytes<CurrentValidator<'a, rancor::Error>>,
-	{
-		// Read length
-		let mut length_buf = L::Buffer::default();
-		let length_buf_slice = L::as_slice(&mut length_buf);
-		let copy_len = usize::min(length_buf_slice.len(), bytes.len());
-		length_buf_slice[..copy_len].copy_from_slice(&bytes[..copy_len]);
-
-		// Decode length
-		let (archive_len, remaining) =
-			L::decode(length_buf_slice).map_err(RkyvCodecError::ReadLengthError)?;
-
-		// Read into aligned buffer
-		let begin = length_buf_slice.len() - remaining.len();
-		let end = begin + archive_len;
-		buffer.extend_from_slice(&bytes[begin..end]);
-		bytes.advance(end);
-
-		let archive = cur_api::access::<Archived<Packet>, rancor::Error>(&*buffer)?;
-		Ok(archive)
-	}
+/// Writes a single `Object` from a `bytes::Bytes`
+pub fn archive_sink_bytes<Packet: Archive, L: LengthCodec>(
+	bytes: &mut impl BufMut,
+	archived: &[u8],
+) -> Result<(), RkyvCodecError<L>> {
+	let length_buf = &mut L::Buffer::default();
+	let length_buf = L::encode(archived.len(), length_buf);
+	bytes.put(length_buf);
+	bytes.put(archived);
+	Ok(())
 }
-pub use no_std_feature::*;
+/// Reads a single `&Archived<Object>` from a `bytes::Bytes` into the passed buffer
+/// # Safety
+/// This will cause undefined behavior if the bytestream is not the correct format (i.e. not generated through `archive_sink[_bytes]`, `RkyvWriter`, or `RkyvCodec`) with the correct LengthCodec
+pub unsafe fn archive_stream_bytes_unsafe<'b, Packet: Archive, L: LengthCodec>(
+	bytes: &mut impl Buf,
+	buffer: &'b mut AlignedVec,
+) -> Result<&'b Archived<Packet>, RkyvCodecError<L>> {
+	// Read length
+	let archive_len = L::decode_bytes(bytes).map_err(RkyvCodecError::ReadLengthError)?;
+
+	// Read specific amount into aligned buffer
+	buffer.extend_from_reader(&mut bytes.take(archive_len).reader())?;
+
+	// reinterpret cast
+	let archive = unsafe { rkyv::access_unchecked::<Packet::Archived>(buffer) };
+	Ok(archive)
+}
+/// Reads a single `&Archived<Object>` from a `bytes::Bytes` into the passed buffer if validation enabled.
+pub fn archive_stream_bytes<'b, Packet: Archive, L: LengthCodec>(
+	bytes: &mut impl Buf,
+	buffer: &'b mut AlignedVec,
+) -> Result<&'b Archived<Packet>, RkyvCodecError<L>>
+where
+	<Packet as Archive>::Archived: for<'a> CheckBytes<CurrentValidator<'a, rancor::Error>>,
+{
+	// Read length
+	let archive_len = L::decode_bytes(bytes).map_err(RkyvCodecError::ReadLengthError)?;
+
+	// Read specific amount into aligned buffer
+	buffer.extend_from_reader(&mut bytes.take(archive_len).reader())?;
+
+	let archive = cur_api::access::<Archived<Packet>, rancor::Error>(&*buffer)?;
+	Ok(archive)
+}
 
 #[cfg(test)]
 #[cfg(feature = "std")]
@@ -335,9 +314,9 @@ mod tests {
 	}
 
 	#[async_std::test]
-	#[cfg(feature = "futures_stream")]
+	#[cfg(feature = "aio")]
 	async fn futures_ser_de() {
-		let codec = crate::futures_stream::RkyvCodec::<Test, TestLengthCodec>::default();
+		let codec = crate::aio::RkyvCodec::<Test, TestLengthCodec>::default();
 		let mut buffer = vec![0u8; 256];
 		let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
 		framed.send(TEST.clone()).await.unwrap();
@@ -451,14 +430,14 @@ mod tests {
 		});
 	}
 
-	#[cfg(feature = "futures_stream")]
+	#[cfg(feature = "aio")]
 	#[bench]
 	fn bench_rkyv_asynchronous_codec_sink_50(b: &mut Bencher) {
 		let mut buffer = Vec::with_capacity(1024);
 		b.iter(|| {
 			block_on(async {
 				buffer.clear();
-				let codec = crate::futures_stream::RkyvCodec::<Test, TestLengthCodec>::default();
+				let codec = crate::aio::RkyvCodec::<Test, TestLengthCodec>::default();
 				let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
 				for _ in 0..50 {
 					framed.send(TEST.clone()).await.unwrap();
@@ -467,7 +446,7 @@ mod tests {
 		});
 		block_on(consume_amount::<_, TestLengthCodec>(&mut &buffer[..], 50));
 	}
-	#[cfg(feature = "futures_stream")]
+	#[cfg(feature = "aio")]
 	#[bench]
 	fn bench_rkyv_asynchronous_codec_stream_50(b: &mut Bencher) {
 		use futures::TryStreamExt;
@@ -475,7 +454,7 @@ mod tests {
 
 		block_on(gen_amount::<_, TestLengthCodec>(&mut buffer, 50));
 
-		let codec = crate::futures_stream::RkyvCodec::<Test, TestLengthCodec>::default();
+		let codec = crate::aio::RkyvCodec::<Test, TestLengthCodec>::default();
 		let mut framed = asynchronous_codec::Framed::new(Cursor::new(&mut buffer), codec);
 		b.iter(|| {
 			block_on(async {

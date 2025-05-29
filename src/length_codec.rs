@@ -1,7 +1,8 @@
 use core::{error, fmt};
 
+use bytes::Buf;
 #[cfg(feature = "std")]
-use futures::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
+use futures::{AsyncRead, AsyncReadExt};
 
 #[cfg(feature = "std")]
 #[derive(Debug)]
@@ -21,9 +22,11 @@ pub trait LengthCodec: fmt::Debug + 'static {
 	/// Decode from buffer, fails if length is formatted incorrectly, returns length and remaining buffer
 	fn decode(buffer: &[u8]) -> Result<(usize, &[u8]), Self::Error>;
 
-	#[cfg(feature = "std")]
+	fn decode_bytes(buf: &mut impl Buf) -> Result<usize, Self::Error>;
+
+	#[cfg(feature = "aio")]
 	#[allow(async_fn_in_trait)]
-	async fn decode_async<'a, W: AsyncBufRead + Unpin>(
+	async fn decode_async<'a, W: AsyncRead + Unpin>(
 		reader: &'a mut W,
 	) -> Result<usize, WithIOError<Self::Error>>;
 }
@@ -36,6 +39,16 @@ pub enum VarintLengthError {
 	Overflow,
 	#[error("not minimal, too many trailing zero bytes")]
 	NotMinimal,
+}
+impl From<unsigned_varint::decode::Error> for VarintLengthError {
+	fn from(error: unsigned_varint::decode::Error) -> Self {
+		match error {
+			unsigned_varint::decode::Error::Insufficient => VarintLengthError::Insufficient,
+			unsigned_varint::decode::Error::Overflow => VarintLengthError::Overflow,
+			unsigned_varint::decode::Error::NotMinimal => VarintLengthError::NotMinimal,
+			_ => unreachable!(),
+		}
+	}
 }
 
 /// Variable-bit length encoding based using unsigned_varint crate, currently can handle lengths up to 2^63
@@ -59,63 +72,32 @@ impl LengthCodec for VarintLength {
 
 	#[inline]
 	fn decode(buf: &[u8]) -> Result<(usize, &[u8]), Self::Error> {
-		unsigned_varint::decode::usize(buf).map_err(|e| match e {
-			unsigned_varint::decode::Error::Insufficient => VarintLengthError::Insufficient,
-			unsigned_varint::decode::Error::Overflow => VarintLengthError::Overflow,
-			unsigned_varint::decode::Error::NotMinimal => VarintLengthError::NotMinimal,
-			_ => unreachable!(),
-		})
+		Ok(unsigned_varint::decode::usize(buf)?)
+	}
+	fn decode_bytes(buf: &mut impl Buf) -> Result<usize, Self::Error> {
+		let len = unsigned_varint::io::read_usize(buf.reader()).map_err(|e| match e {
+			unsigned_varint::io::ReadError::Io(_) => VarintLengthError::Insufficient, // only EOF error should occur here
+			unsigned_varint::io::ReadError::Decode(error) => error.into(),
+			_ => todo!(),
+		})?;
+		// advanced by
+		Ok(len)
 	}
 
-	#[cfg(feature = "std")]
-	async fn decode_async<'a, R: AsyncBufRead + Unpin>(
+	#[cfg(feature = "aio")]
+	async fn decode_async<'a, R: AsyncRead + Unpin>(
 		reader: &'a mut R,
 	) -> Result<usize, WithIOError<Self::Error>> {
-		let max_varint_len = Self::Buffer::default().len();
-
-		loop {
-			// get current buf
-			let available_bytes = reader.fill_buf().await.map_err(WithIOError::IoError)?;
-
-			if available_bytes.is_empty() {
-				// EOF reached. If we are in this loop, it implies a previous decode attempt
-				// resulted in Insufficient, so this is a definitive error.
-				return Err(WithIOError::LengthDecodeError(
-					VarintLengthError::Insufficient,
-				));
-			}
-			// first 10 bytes as slice.
-			let slice_to_decode = if available_bytes.len() > max_varint_len {
-				&available_bytes[..max_varint_len]
-			} else {
-				available_bytes
-			};
-			// attempt to decode byte slice
-			match Self::decode(slice_to_decode) {
-				// success, advance reader buffer
-				Ok((length_value, remaining_in_slice)) => {
-					let varint_byte_count = slice_to_decode.len() - remaining_in_slice.len();
-					reader.consume_unpin(varint_byte_count);
-					return Ok(length_value);
+		let len = unsigned_varint::aio::read_usize(reader)
+			.await
+			.map_err(|e| match e {
+				unsigned_varint::io::ReadError::Io(error) => WithIOError::IoError(error),
+				unsigned_varint::io::ReadError::Decode(error) => {
+					WithIOError::LengthDecodeError(error.into())
 				}
-				Err(decode_error) => {
-					match decode_error {
-						VarintLengthError::Insufficient => {
-							// Not enough bytes in slice_to_decode.
-							// If slice_to_decode was already max_varint_len, then the varint is malformed/too long.
-							if slice_to_decode.len() == max_varint_len {
-								return Err(WithIOError::LengthDecodeError(
-									VarintLengthError::Insufficient,
-								));
-							}
-							// Otherwise, we need more data. Loop again to call fill_buf().
-							// No bytes are consumed from the reader at this point.
-						}
-						err => return Err(WithIOError::LengthDecodeError(err)),
-					}
-				}
-			}
-		}
+				_ => todo!(),
+			})?;
+		Ok(len)
 	}
 }
 
@@ -163,8 +145,15 @@ macro_rules! impl_uint_length_codec {
 				Ok((<$uint_type>::from_be_bytes(bytes) as usize, rest))
 			}
 
-			#[cfg(feature = "std")]
-			async fn decode_async<'a, R: AsyncBufRead + AsyncBufReadExt + Unpin>(
+			#[inline]
+			fn decode_bytes(buf: &mut impl Buf) -> Result<usize, Self::Error> {
+				let mut buffer = Self::Buffer::default();
+				buf.copy_to_slice(&mut buffer);
+				Self::decode(&buffer).map(|(len, _)| len)
+			}
+
+			#[cfg(feature = "aio")]
+			async fn decode_async<'a, R: AsyncRead + Unpin>(
 				reader: &'a mut R,
 			) -> Result<usize, WithIOError<Self::Error>> {
 				let mut buffer = Self::Buffer::default();
